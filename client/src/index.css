@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+  background-image:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(14, 165, 233, 0.16), transparent 28%);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.7) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 9999px;
+}
+
+.glass {
+  @apply border border-white/60 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/70;
+}
+
+.panel {
+  @apply rounded-2xl border border-slate-200/70 bg-white/80 shadow-soft backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/70;
+}
+
+.nav-pill {
+  @apply flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition;
+}
+
+.nav-pill-active {
+  @apply bg-cloud-600 text-white shadow-glow;
+}
+
+.metric-accent {
+  background-image: linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(14, 165, 233, 0.08));
+}
