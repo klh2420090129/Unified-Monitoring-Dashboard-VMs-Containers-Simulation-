@@ -12,8 +12,13 @@ A full-stack cloud monitoring simulation for VMs and container workloads, built 
 - Realtime CPU, memory, and network charts
 - Alerts for CPU > 85% and memory > 90%
 - Simulated logs with filtering by log level
+- AI Prediction Panel with trend-based incident forecasting
+- One-click Run Incident Simulation demo flow
+- Dynamic system health tags in the top bar
+- Expandable pod groups with container drilldown
+- Cost analysis and autoscaling simulation panels
+- Service dependency graph / architecture view
 - Dark mode toggle
-- Cost estimation and autoscaling simulation panels
 - Docker and Docker Compose support
 
 ## Project Structure
@@ -74,9 +79,12 @@ docker compose up --build
 ### AWS EC2
 
 1. Launch an EC2 instance with Docker and Docker Compose installed.
-2. Copy the repo to the instance.
+2. Copy the repo to the instance or clone it from GitHub.
 3. Run `docker compose up --build -d`.
-4. Open security group ports for `8080` and `4000`, or place an Nginx reverse proxy in front of the stack.
+4. Use the Nginx proxy so the app is exposed on one public URL.
+5. Keep the instance stopped when you are not demoing to save credits.
+
+The repo also includes `ec2-helper.ps1` for local SSH access using the `.pem` key in the project folder.
 
 ### Azure
 
