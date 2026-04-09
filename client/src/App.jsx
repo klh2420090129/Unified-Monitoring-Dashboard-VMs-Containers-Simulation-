@@ -17,7 +17,13 @@ import { PredictionsPanel } from './components/PredictionsPanel';
 import { CostAnalysisPanel } from './components/CostAnalysisPanel';
 import { DependencyGraphPanel } from './components/DependencyGraphPanel';
 
-const socket = io(import.meta.env.VITE_API_URL || 'http://localhost:4000', { autoConnect: false });
+const runtimeSocketBase =
+  import.meta.env.VITE_API_URL?.trim() || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000');
+
+const socket = io(runtimeSocketBase, {
+  autoConnect: false,
+  path: '/socket.io'
+});
 
 const defaultOverview = {
   totalVmRunning: 0,
