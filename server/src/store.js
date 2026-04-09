@@ -8,6 +8,13 @@ const regions = ['us-east-1', 'us-west-2', 'eu-west-1'];
 const VM_SCALE_OUT_THRESHOLD = 70;
 const VM_SCALE_IN_AVERAGE_THRESHOLD = 52;
 
+const AUTOSCALING_POLICY_DEFAULTS = {
+  cpuThreshold: 70,
+  cooldownSeconds: 20,
+  minVmsPerRegion: 1,
+  maxVmsPerRegion: 4
+};
+
 const COST_RATES = {
   vmBase: 47,
   vmPerRunning: 58,
@@ -93,6 +100,7 @@ export function createInitialState() {
         cpu: 85,
         memory: 90
       },
+      autoscalingPolicy: { ...AUTOSCALING_POLICY_DEFAULTS },
       notifications: {
         email: true,
         slack: false,
@@ -239,14 +247,26 @@ function getRegionalRunningVmStats(region) {
   };
 }
 
+function getAutoscalingPolicy() {
+  const policy = state.settings?.autoscalingPolicy || {};
+
+  return {
+    cpuThreshold: clamp(Number(policy.cpuThreshold ?? AUTOSCALING_POLICY_DEFAULTS.cpuThreshold), 50, 95),
+    cooldownSeconds: clamp(Number(policy.cooldownSeconds ?? AUTOSCALING_POLICY_DEFAULTS.cooldownSeconds), 5, 300),
+    minVmsPerRegion: clamp(Number(policy.minVmsPerRegion ?? AUTOSCALING_POLICY_DEFAULTS.minVmsPerRegion), 1, 10),
+    maxVmsPerRegion: clamp(Number(policy.maxVmsPerRegion ?? AUTOSCALING_POLICY_DEFAULTS.maxVmsPerRegion), 1, 20)
+  };
+}
+
 export function evaluateAutoscaling() {
   if (!state.metrics.autoscalingEnabled) {
     state.metrics.autoscalingState = 'Disabled';
     return null;
   }
 
+  const policy = getAutoscalingPolicy();
   const lastActionAt = state.metrics.lastScalingAt ? new Date(state.metrics.lastScalingAt).getTime() : 0;
-  const inCooldown = Date.now() - lastActionAt < 20000;
+  const inCooldown = Date.now() - lastActionAt < policy.cooldownSeconds * 1000;
   if (inCooldown) {
     return null;
   }
@@ -254,22 +274,22 @@ export function evaluateAutoscaling() {
   for (const region of regions) {
     const regional = getRegionalRunningVmStats(region);
     const hasCapacityPressure =
-      regional.running.length > 0 && regional.running.every((vm) => vm.cpu > VM_SCALE_OUT_THRESHOLD);
+      regional.running.length > 0 && regional.running.every((vm) => vm.cpu > policy.cpuThreshold);
 
-    if (hasCapacityPressure) {
+    if (hasCapacityPressure && regional.running.length < policy.maxVmsPerRegion) {
       const created = addAutoscaledVm(region);
       const action = `+1 VM added in ${region}`;
       state.metrics.lastScalingAction = `${action} at ${now()}`;
       state.metrics.lastScalingAt = now();
       state.metrics.autoscalingState = 'Scaling Out';
-      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} because all regional VMs are above ${VM_SCALE_OUT_THRESHOLD}% CPU.` });
+      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} because all regional VMs are above ${policy.cpuThreshold}% CPU.` });
       return { type: 'out', message: action, region, vmName: created.name };
     }
   }
 
   for (const region of regions) {
     const regional = getRegionalRunningVmStats(region);
-    const canScaleIn = regional.autoscaledRunning > 0 && regional.averageCpu < VM_SCALE_IN_AVERAGE_THRESHOLD;
+    const canScaleIn = regional.autoscaledRunning > 0 && regional.running.length > policy.minVmsPerRegion && regional.averageCpu < policy.cpuThreshold - 12;
     if (canScaleIn) {
       const removed = removeAutoscaledVm(region);
       if (!removed) {
@@ -487,7 +507,8 @@ export function buildCostSummary() {
       baselineWithoutAutoscaled,
       autoscaledVmCount: autoscaledRunning,
       optimizationNote
-    }
+    },
+    autoscalingPolicy: getAutoscalingPolicy()
   };
 }
 

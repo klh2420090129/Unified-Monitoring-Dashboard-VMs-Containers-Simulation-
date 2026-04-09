@@ -1,5 +1,26 @@
-export function SettingsPanel({ overview, pods, regions, cost, autoscaling, canManage, onToggleAutoscaling }) {
+import { useEffect, useState } from 'react';
+
+export function SettingsPanel({ overview, pods, regions, cost, autoscaling, settings, canManage, onToggleAutoscaling, onSaveAutoscalingPolicy }) {
   const autoscalingEnabled = autoscaling?.enabled !== false;
+  const [policy, setPolicy] = useState(() => ({
+    cpuThreshold: settings?.autoscalingPolicy?.cpuThreshold ?? 70,
+    cooldownSeconds: settings?.autoscalingPolicy?.cooldownSeconds ?? 20,
+    minVmsPerRegion: settings?.autoscalingPolicy?.minVmsPerRegion ?? 1,
+    maxVmsPerRegion: settings?.autoscalingPolicy?.maxVmsPerRegion ?? 4
+  }));
+
+  useEffect(() => {
+    setPolicy({
+      cpuThreshold: settings?.autoscalingPolicy?.cpuThreshold ?? 70,
+      cooldownSeconds: settings?.autoscalingPolicy?.cooldownSeconds ?? 20,
+      minVmsPerRegion: settings?.autoscalingPolicy?.minVmsPerRegion ?? 1,
+      maxVmsPerRegion: settings?.autoscalingPolicy?.maxVmsPerRegion ?? 4
+    });
+  }, [settings]);
+
+  function savePolicy() {
+    onSaveAutoscalingPolicy?.(policy);
+  }
 
   return (
     <div className="grid gap-6 xl:grid-cols-2">
@@ -24,6 +45,27 @@ export function SettingsPanel({ overview, pods, regions, cost, autoscaling, canM
         </div>
       </div>
       <div className="panel p-5">
+        <p className="text-sm uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">Autoscaling policy</p>
+        <h3 className="mt-1 text-lg font-semibold text-slate-950 dark:text-white">Region-based VM automation</h3>
+        <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+          When every running VM in a region crosses the threshold, the simulator adds a VM there. Once the region settles, it removes only the autoscaled VM.
+        </p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <NumberField label="Scale-out CPU threshold" value={policy.cpuThreshold} onChange={(value) => setPolicy((current) => ({ ...current, cpuThreshold: value }))} />
+          <NumberField label="Cooldown (seconds)" value={policy.cooldownSeconds} onChange={(value) => setPolicy((current) => ({ ...current, cooldownSeconds: value }))} />
+          <NumberField label="Min VMs per region" value={policy.minVmsPerRegion} onChange={(value) => setPolicy((current) => ({ ...current, minVmsPerRegion: value }))} />
+          <NumberField label="Max VMs per region" value={policy.maxVmsPerRegion} onChange={(value) => setPolicy((current) => ({ ...current, maxVmsPerRegion: value }))} />
+        </div>
+        {canManage && (
+          <button
+            onClick={savePolicy}
+            className="mt-4 rounded-2xl bg-cloud-600 px-4 py-3 text-sm font-semibold text-white"
+          >
+            Save Autoscaling Policy
+          </button>
+        )}
+      </div>
+      <div className="panel p-5">
         <p className="text-sm uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">Deployment notes</p>
         <h3 className="mt-1 text-lg font-semibold text-slate-950 dark:text-white">AWS EC2 and Azure ready</h3>
         <div className="mt-5 space-y-3 text-sm text-slate-600 dark:text-slate-400">
@@ -42,5 +84,19 @@ function InfoRow({ label, value }) {
       <span className="text-slate-500 dark:text-slate-400">{label}</span>
       <span className="text-right font-medium text-slate-950 dark:text-white">{value}</span>
     </div>
+  );
+}
+
+function NumberField({ label, value, onChange }) {
+  return (
+    <label className="block rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-950/60">
+      <span className="text-slate-500 dark:text-slate-400">{label}</span>
+      <input
+        type="number"
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="mt-2 w-full bg-transparent font-semibold text-slate-950 outline-none dark:text-white"
+      />
+    </label>
   );
 }

@@ -718,8 +718,10 @@ export default function App() {
           regions={regions}
           cost={cost}
           autoscaling={autoscaling}
+          settings={adminSettings}
           canManage={canManage}
           onToggleAutoscaling={handleAutoscalingToggle}
+          onSaveAutoscalingPolicy={(policy) => handleSaveAdminSettings({ autoscalingPolicy: policy })}
         />
       )}
       {activeView === 'Cost Analysis' && <CostAnalysisPanel cost={cost} vms={vms} containers={containers} />}

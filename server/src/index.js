@@ -157,6 +157,7 @@ app.get('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
   res.json({
     thresholds: state.settings?.thresholds || { cpu: 85, memory: 90 },
+    autoscalingPolicy: state.settings?.autoscalingPolicy || { cpuThreshold: 70, cooldownSeconds: 20, minVmsPerRegion: 1, maxVmsPerRegion: 4 },
     notifications: state.settings?.notifications || { email: true, slack: false, teams: false, webhookUrl: '' }
   });
 });
@@ -174,6 +175,12 @@ app.put('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
       cpu: Math.max(55, Math.min(98, Number.isNaN(nextCpu) ? 85 : nextCpu)),
       memory: Math.max(60, Math.min(98, Number.isNaN(nextMemory) ? 90 : nextMemory))
     },
+    autoscalingPolicy: {
+      cpuThreshold: Math.max(50, Math.min(95, Number(req.body?.autoscalingPolicy?.cpuThreshold ?? state.settings?.autoscalingPolicy?.cpuThreshold ?? 70))),
+      cooldownSeconds: Math.max(5, Math.min(300, Number(req.body?.autoscalingPolicy?.cooldownSeconds ?? state.settings?.autoscalingPolicy?.cooldownSeconds ?? 20))),
+      minVmsPerRegion: Math.max(1, Math.min(10, Number(req.body?.autoscalingPolicy?.minVmsPerRegion ?? state.settings?.autoscalingPolicy?.minVmsPerRegion ?? 1))),
+      maxVmsPerRegion: Math.max(1, Math.min(20, Number(req.body?.autoscalingPolicy?.maxVmsPerRegion ?? state.settings?.autoscalingPolicy?.maxVmsPerRegion ?? 4)))
+    },
     notifications: {
       ...(state.settings?.notifications || {}),
       email: Boolean(req.body?.notifications?.email),
@@ -188,6 +195,7 @@ app.put('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
 
   res.json({
     thresholds: state.settings.thresholds,
+    autoscalingPolicy: state.settings.autoscalingPolicy,
     notifications: state.settings.notifications
   });
 });
@@ -757,6 +765,7 @@ app.get('/api/settings', authRequired, async (req, res) => {
   res.json({
     regions: sampleRegions,
     alertThresholds: state.settings?.thresholds || { cpu: 85, memory: 90 },
+    autoscalingPolicy: state.settings?.autoscalingPolicy || { cpuThreshold: 70, cooldownSeconds: 20, minVmsPerRegion: 1, maxVmsPerRegion: 4 },
     notifications: state.settings?.notifications || { email: true, slack: false, teams: false, webhookUrl: '' }
   });
 });
