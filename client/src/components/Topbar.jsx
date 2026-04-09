@@ -15,6 +15,8 @@ export function Topbar({
   canManage,
   onIncident,
   onRunDemo,
+  onStopDemo,
+  isDemoRunning,
   systemStatus
 }) {
   const { theme, toggleTheme } = useTheme();
@@ -78,9 +80,17 @@ export function Topbar({
               </button>
               <button
                 onClick={onRunDemo}
-                className="rounded-2xl bg-cloud-600 px-3 py-2 text-sm font-semibold text-white shadow-glow transition hover:bg-cloud-700"
+                disabled={isDemoRunning}
+                className="rounded-2xl bg-cloud-600 px-3 py-2 text-sm font-semibold text-white shadow-glow transition hover:bg-cloud-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Run Incident Simulation
+                {isDemoRunning ? 'Simulation Running...' : 'Run Incident Simulation'}
+              </button>
+              <button
+                onClick={onStopDemo}
+                disabled={!isDemoRunning}
+                className="rounded-2xl bg-amber-500/20 px-3 py-2 text-sm font-semibold text-amber-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-amber-200"
+              >
+                Stop Simulation
               </button>
             </>
           )}

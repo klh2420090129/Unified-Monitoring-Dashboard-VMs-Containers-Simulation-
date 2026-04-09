@@ -67,8 +67,10 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [lastUpdatedAt, setLastUpdatedAt] = useState(new Date());
   const [metricDeltas, setMetricDeltas] = useState({ cpu: 0, memory: 0, network: 0, alerts: 0 });
+  const [isDemoRunning, setIsDemoRunning] = useState(false);
   const [form, setForm] = useState({ name: '', email: '', password: '', role: 'Viewer' });
   const previousOverviewRef = useRef(defaultOverview);
+  const demoCancelRef = useRef(false);
 
   const canManage = auth.user?.role === 'Admin';
   const notifications = alerts.length + logs.filter((log) => log.level === 'ERROR').length;
@@ -477,38 +479,53 @@ export default function App() {
   }
 
   async function handleRunDemoSimulation() {
-    if (!canManage) return;
+    if (!canManage || isDemoRunning) return;
+
+    const abortIfCancelled = () => {
+      if (demoCancelRef.current) {
+        const error = new Error('__DEMO_CANCELLED__');
+        throw error;
+      }
+    };
 
     try {
+      setIsDemoRunning(true);
+      demoCancelRef.current = false;
       setMessage('Running incident simulation: spike, scale, recover...');
       await request('/api/autoscaling', {
         token: auth.token,
         method: 'POST',
         body: { enabled: true }
       });
+      abortIfCancelled();
 
       const spikePayload = await request('/api/simulate/incident', {
         token: auth.token,
         method: 'POST',
         body: { action: 'start' }
       });
+      abortIfCancelled();
       setOverview(spikePayload.overview || overview);
       setAlerts(spikePayload.alerts || alerts);
       setHistory(spikePayload.history || history);
       setLogs(spikePayload.logs || logs);
 
-      await sleep(2500);
+      await sleep(850);
+      abortIfCancelled();
 
       const livePredictions = await request('/api/predictions', { token: auth.token });
+      abortIfCancelled();
       setPredictions(livePredictions.predictions || []);
 
-      await sleep(2500);
+      await sleep(850);
+      abortIfCancelled();
 
       const recoveryPayload = await request('/api/simulate/incident', {
         token: auth.token,
         method: 'POST',
         body: { action: 'resolve' }
       });
+      abortIfCancelled();
       setOverview(recoveryPayload.overview || overview);
       setAlerts(recoveryPayload.alerts || alerts);
       setHistory(recoveryPayload.history || history);
@@ -519,8 +536,21 @@ export default function App() {
       setMessage('Demo simulation completed: spike, alerting, scaling, and recovery are now visible.');
       setLastUpdatedAt(new Date());
     } catch (error) {
-      setMessage(error.message);
+      if (error?.message === '__DEMO_CANCELLED__') {
+        setMessage('Incident simulation stopped.');
+      } else {
+        setMessage(error.message);
+      }
+    } finally {
+      setIsDemoRunning(false);
+      demoCancelRef.current = false;
     }
+  }
+
+  function handleStopDemoSimulation() {
+    if (!isDemoRunning) return;
+    demoCancelRef.current = true;
+    setMessage('Stopping incident simulation...');
   }
 
   function exportCsv(kind) {
@@ -624,6 +654,8 @@ export default function App() {
           canManage={canManage}
           onIncident={handleIncident}
           onRunDemo={handleRunDemoSimulation}
+          onStopDemo={handleStopDemoSimulation}
+          isDemoRunning={isDemoRunning}
           systemStatus={systemStatus}
         />
       }
