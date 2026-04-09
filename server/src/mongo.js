@@ -21,7 +21,8 @@ const vmSchema = new mongoose.Schema(
     cpu: Number,
     memory: Number,
     disk: Number,
-    spike: Boolean
+    spike: Boolean,
+    createdByAutoscaler: Boolean
   },
   { timestamps: true }
 );
@@ -76,12 +77,22 @@ const historySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const controlPlaneSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: 'default', index: true },
+    settings: { type: mongoose.Schema.Types.Mixed, default: {} },
+    timeline: { type: Array, default: [] }
+  },
+  { timestamps: true, minimize: false }
+);
+
 export const User = mongoose.models.User || mongoose.model('User', userSchema);
 export const Vm = mongoose.models.Vm || mongoose.model('Vm', vmSchema);
 export const Container = mongoose.models.Container || mongoose.model('Container', containerSchema);
 export const Alert = mongoose.models.Alert || mongoose.model('Alert', alertSchema);
 export const LogEntry = mongoose.models.LogEntry || mongoose.model('LogEntry', logSchema);
 export const HistoryPoint = mongoose.models.HistoryPoint || mongoose.model('HistoryPoint', historySchema);
+export const ControlPlane = mongoose.models.ControlPlane || mongoose.model('ControlPlane', controlPlaneSchema);
 
 export async function connectMongo(uri) {
   if (!uri) {
@@ -109,7 +120,8 @@ export async function seedFromState(state) {
     Container.estimatedDocumentCount(),
     Alert.estimatedDocumentCount(),
     LogEntry.estimatedDocumentCount(),
-    HistoryPoint.estimatedDocumentCount()
+    HistoryPoint.estimatedDocumentCount(),
+    ControlPlane.estimatedDocumentCount()
   ]);
 
   if (counts[0] === 0 && state.users.length > 0) await User.insertMany(state.users);
@@ -118,6 +130,7 @@ export async function seedFromState(state) {
   if (counts[3] === 0 && state.alerts.length > 0) await Alert.insertMany(state.alerts);
   if (counts[4] === 0 && state.logs.length > 0) await LogEntry.insertMany(state.logs);
   if (counts[5] === 0 && state.history.length > 0) await HistoryPoint.insertMany(state.history);
+  if (counts[6] === 0) await ControlPlane.create({ id: 'default', settings: state.settings, timeline: state.timeline || [] });
 }
 
 export async function replaceAllData(state) {
@@ -127,7 +140,8 @@ export async function replaceAllData(state) {
     Container.deleteMany({}),
     Alert.deleteMany({}),
     LogEntry.deleteMany({}),
-    HistoryPoint.deleteMany({})
+    HistoryPoint.deleteMany({}),
+    ControlPlane.deleteMany({})
   ]);
 
   if (state.users.length > 0) await User.insertMany(state.users);
@@ -136,16 +150,18 @@ export async function replaceAllData(state) {
   if (state.alerts.length > 0) await Alert.insertMany(state.alerts);
   if (state.logs.length > 0) await LogEntry.insertMany(state.logs);
   if (state.history.length > 0) await HistoryPoint.insertMany(state.history);
+  await ControlPlane.create({ id: 'default', settings: state.settings, timeline: state.timeline || [] });
 }
 
 export async function loadStateFromMongo(state) {
-  const [users, vms, containers, alerts, logs, history] = await Promise.all([
+  const [users, vms, containers, alerts, logs, history, controlPlane] = await Promise.all([
     User.find().lean(),
     Vm.find().lean(),
     Container.find().lean(),
     Alert.find().sort({ createdAt: -1 }).lean(),
     LogEntry.find().sort({ createdAt: -1 }).lean(),
-    HistoryPoint.find().sort({ createdAt: 1 }).lean()
+    HistoryPoint.find().sort({ createdAt: 1 }).lean(),
+    ControlPlane.findOne({ id: 'default' }).lean()
   ]);
 
   if (users.length > 0) state.users = users;
@@ -154,6 +170,8 @@ export async function loadStateFromMongo(state) {
   state.alerts = alerts;
   state.logs = logs;
   state.history = history;
+  if (controlPlane?.settings) state.settings = controlPlane.settings;
+  if (Array.isArray(controlPlane?.timeline)) state.timeline = controlPlane.timeline;
   state.activeAlertKeys = new Set(state.alerts.map((alert) => `${alert.source}:${alert.metric}`));
 }
 
@@ -185,6 +203,14 @@ export async function saveHistoryPoint(point) {
   await HistoryPoint.updateOne({ id: point.id }, { $set: point }, { upsert: true });
 }
 
+export async function saveControlPlaneState(state) {
+  await ControlPlane.updateOne(
+    { id: 'default' },
+    { $set: { id: 'default', settings: state.settings, timeline: state.timeline || [] } },
+    { upsert: true }
+  );
+}
+
 export async function persistState(state) {
   await Promise.all(state.users.map((item) => saveUser(item)));
   await Promise.all(state.vms.map((item) => saveVm(item)));
@@ -192,4 +218,5 @@ export async function persistState(state) {
   await Promise.all(state.alerts.map((item) => saveAlert(item)));
   await Promise.all(state.logs.map((item) => saveLog(item)));
   await Promise.all(state.history.map((item) => saveHistoryPoint(item)));
+  await saveControlPlaneState(state);
 }

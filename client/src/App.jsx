@@ -16,6 +16,7 @@ import { AboutPanel } from './components/AboutPanel';
 import { PredictionsPanel } from './components/PredictionsPanel';
 import { CostAnalysisPanel } from './components/CostAnalysisPanel';
 import { DependencyGraphPanel } from './components/DependencyGraphPanel';
+import { OperationsInsightsPanel } from './components/OperationsInsightsPanel';
 import { AdminOpsPanel } from './components/AdminOpsPanel';
 import { AuditTrailPanel } from './components/AuditTrailPanel';
 
@@ -55,6 +56,7 @@ export default function App() {
   const [cost, setCost] = useState(null);
   const [autoscaling, setAutoscaling] = useState(null);
   const [predictions, setPredictions] = useState([]);
+  const [insights, setInsights] = useState(null);
   const [adminSettings, setAdminSettings] = useState(null);
   const [auditLogs, setAuditLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -91,10 +93,11 @@ export default function App() {
       request('/api/cost', { token: auth.token }),
       request('/api/autoscaling', { token: auth.token }),
       request('/api/predictions', { token: auth.token }),
+      request('/api/insights', { token: auth.token }),
       canManage ? request('/api/admin/settings', { token: auth.token }) : Promise.resolve(null),
       canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] })
     ])
-      .then(([overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, settingsPayload, costPayload, autoscalingPayload, predictionsPayload, adminSettingsPayload, auditPayload]) => {
+      .then(([overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, settingsPayload, costPayload, autoscalingPayload, predictionsPayload, insightsPayload, adminSettingsPayload, auditPayload]) => {
         if (!mounted) return;
         setOverview(overviewPayload.overview);
         setRegions(settingsPayload.regions);
@@ -107,6 +110,7 @@ export default function App() {
         setCost(costPayload);
         setAutoscaling(autoscalingPayload);
         setPredictions(predictionsPayload.predictions || []);
+        setInsights(insightsPayload);
         setAdminSettings(adminSettingsPayload);
         setAuditLogs(auditPayload.auditLogs || []);
         setLastUpdatedAt(new Date());
@@ -150,18 +154,24 @@ export default function App() {
       setLogs(incoming);
       setLastUpdatedAt(new Date());
     });
+    socket.on('insights:update', (incoming) => {
+      setInsights(incoming);
+      setLastUpdatedAt(new Date());
+    });
 
     const refreshTimer = setInterval(() => {
       Promise.all([
         request('/api/predictions', { token: auth.token }),
         request('/api/autoscaling', { token: auth.token }),
-        request('/api/cost', { token: auth.token })
+        request('/api/cost', { token: auth.token }),
+        request('/api/insights', { token: auth.token })
       ])
-        .then(([predictionPayload, autoscalingPayload, costPayload]) => {
+        .then(([predictionPayload, autoscalingPayload, costPayload, insightsPayload]) => {
           if (mounted) {
             setPredictions(predictionPayload.predictions || []);
             setAutoscaling(autoscalingPayload);
             setCost(costPayload);
+            setInsights(insightsPayload);
           }
         })
         .catch(() => {});
@@ -176,6 +186,7 @@ export default function App() {
       socket.off('containers:update');
       socket.off('alerts:update');
       socket.off('logs:update');
+      socket.off('insights:update');
       clearInterval(refreshTimer);
       socket.disconnect();
     };
@@ -237,7 +248,7 @@ export default function App() {
   );
 
   async function refreshCoreData() {
-    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, auditPayload, costPayload, autoscalingPayload] = await Promise.all([
+    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, auditPayload, costPayload, autoscalingPayload, insightsPayload] = await Promise.all([
       request('/api/dashboard/overview', { token: auth.token }),
       request('/api/vms', { token: auth.token }),
       request('/api/containers', { token: auth.token }),
@@ -246,7 +257,8 @@ export default function App() {
       request('/api/logs', { token: auth.token }),
       canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] }),
       request('/api/cost', { token: auth.token }),
-      request('/api/autoscaling', { token: auth.token })
+      request('/api/autoscaling', { token: auth.token }),
+      request('/api/insights', { token: auth.token })
     ]);
 
     setOverview(overviewPayload.overview);
@@ -259,6 +271,7 @@ export default function App() {
     setAuditLogs(auditPayload.auditLogs || []);
     setCost(costPayload);
     setAutoscaling(autoscalingPayload);
+    setInsights(insightsPayload);
     setLastUpdatedAt(new Date());
   }
 
@@ -365,10 +378,15 @@ export default function App() {
 
   async function handleSaveAdminSettings(payload) {
     try {
+      const mergedPayload = {
+        thresholds: payload.thresholds ?? adminSettings?.thresholds,
+        autoscalingPolicy: payload.autoscalingPolicy ?? adminSettings?.autoscalingPolicy,
+        notifications: payload.notifications ?? adminSettings?.notifications
+      };
       const updated = await request('/api/admin/settings', {
         token: auth.token,
         method: 'PUT',
-        body: payload
+        body: mergedPayload
       });
       setAdminSettings(updated);
       await refreshCoreData();
@@ -636,6 +654,7 @@ export default function App() {
       {activeView === 'Dashboard' && (
         <div className="mt-4 space-y-4">
           <ChartsPanel history={history} />
+          <OperationsInsightsPanel insights={insights} cost={cost} history={history} alerts={alerts} vms={vms} containers={containers} />
           <div className="grid gap-4 xl:grid-cols-[1.4fr_0.9fr]">
             <VmTable
               vms={filteredVms}

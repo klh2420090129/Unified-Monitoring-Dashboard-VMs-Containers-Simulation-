@@ -25,6 +25,39 @@ const COST_RATES = {
   autoscaledVmPremium: 16
 };
 
+function createSeedTimeline() {
+  const createdAt = Date.now();
+  return [
+    {
+      id: randomUUID(),
+      timestamp: new Date(createdAt - 180000).toISOString(),
+      type: 'bootstrap',
+      region: 'global',
+      severity: 'Info',
+      title: 'Monitoring dashboard initialized',
+      details: 'Baseline VMs, containers, and alerts loaded into the simulation.'
+    },
+    {
+      id: randomUUID(),
+      timestamp: new Date(createdAt - 120000).toISOString(),
+      type: 'traffic',
+      region: 'us-east-1',
+      severity: 'Info',
+      title: 'Regional traffic baseline established',
+      details: 'Traffic generator is ready to shift load across regions automatically.'
+    },
+    {
+      id: randomUUID(),
+      timestamp: new Date(createdAt - 60000).toISOString(),
+      type: 'policy',
+      region: 'global',
+      severity: 'Info',
+      title: 'Autoscaling policy loaded',
+      details: 'Region-based VM automation is enabled with hysteresis and cost-aware limits.'
+    }
+  ];
+}
+
 function createSeedUsers() {
   return [
     {
@@ -84,6 +117,7 @@ export function createInitialState() {
   const seededContainers = createSeedContainers();
   const historySeed = createSeedHistory();
   const logsSeed = createSeedLogs();
+  const timelineSeed = createSeedTimeline();
 
   const autoscaledVmCount = seededVMs.filter((vm) => vm.createdByAutoscaler).length;
 
@@ -93,6 +127,7 @@ export function createInitialState() {
     containers: seededContainers,
     alerts: [],
     logs: logsSeed,
+    timeline: timelineSeed,
     history: historySeed,
     activeAlertKeys: new Set(),
     settings: {
@@ -119,7 +154,18 @@ export function createInitialState() {
       autoscalingEnabled: true,
       lastScalingAction: 'No scaling action yet',
       lastScalingAt: null,
-      autoscaledVmCount
+      autoscaledVmCount,
+      regionTraffic: {
+        'us-east-1': 46,
+        'us-west-2': 52,
+        'eu-west-1': 41
+      },
+      autoscalingSignals: {
+        'us-east-1': { highStreak: 0, lowStreak: 0 },
+        'us-west-2': { highStreak: 0, lowStreak: 0 },
+        'eu-west-1': { highStreak: 0, lowStreak: 0 }
+      },
+      lastTrafficHotspot: 'us-west-2'
     }
   };
 }
@@ -167,6 +213,21 @@ export function createAlert({ source, severity, metric, value, threshold, messag
 export function clearAlerts() {
   state.alerts = [];
   state.activeAlertKeys.clear();
+}
+
+export function recordTimelineEvent({ type, region = 'global', severity = 'Info', title, details, vmName }) {
+  state.timeline.unshift({
+    id: randomUUID(),
+    timestamp: now(),
+    type,
+    region,
+    severity,
+    title,
+    details,
+    vmName
+  });
+
+  state.timeline = state.timeline.slice(0, 60);
 }
 
 export function findUserByEmail(email) {
@@ -258,6 +319,102 @@ function getAutoscalingPolicy() {
   };
 }
 
+function generateRegionalTrafficPressure(region) {
+  const regionIndex = regions.indexOf(region);
+  const cycle = Math.sin((Date.now() / 240000) + regionIndex * 1.25) * 17;
+  const pulse = Math.sin(Date.now() / 55000 + regionIndex * 0.7) * 8;
+  const hotspotIndex = Math.floor(Date.now() / 30000) % regions.length;
+  const hotspotBonus = hotspotIndex === regionIndex ? 18 : 0;
+  const jitter = (Math.random() - 0.5) * 6;
+  return clamp(Number((48 + cycle + pulse + hotspotBonus + jitter).toFixed(1)), 18, 96);
+}
+
+function getRegionSnapshot(region) {
+  const runningVms = state.vms.filter((vm) => vm.region === region && vm.status === 'Running');
+  const activeContainers = state.containers.filter((container) => container.region === region && container.status !== 'Crashed');
+  const averageCpu = runningVms.length ? runningVms.reduce((sum, vm) => sum + vm.cpu, 0) / runningVms.length : 0;
+  const averageMemory = runningVms.length ? runningVms.reduce((sum, vm) => sum + vm.memory, 0) / runningVms.length : 0;
+  const trafficPressure = Number(state.metrics?.regionTraffic?.[region] ?? averageCpu);
+  const autoscaledVms = runningVms.filter((vm) => vm.createdByAutoscaler).length;
+
+  return {
+    region,
+    trafficPressure,
+    runningVms: runningVms.length,
+    autoscaledVms,
+    activeContainers: activeContainers.length,
+    averageCpu: Number(averageCpu.toFixed(1)),
+    averageMemory: Number(averageMemory.toFixed(1))
+  };
+}
+
+function buildCostForecast(overallEstimate, autoscalingPremium) {
+  const recent = state.history.slice(-6);
+  const first = recent[0] || recent[recent.length - 1];
+  const last = recent[recent.length - 1] || recent[0];
+  const cpuTrend = recent.length > 1 ? (last.cpu - first.cpu) / Math.max(recent.length - 1, 1) : 0;
+  const memoryTrend = recent.length > 1 ? (last.memory - first.memory) / Math.max(recent.length - 1, 1) : 0;
+  const trafficTrend = recent.length > 1 ? (last.network - first.network) / Math.max(recent.length - 1, 1) : 0;
+  const autoscaledRunning = state.vms.filter((vm) => vm.status === 'Running' && vm.createdByAutoscaler).length;
+  const growthMultiplier = clamp(1 + (cpuTrend / 130) + (memoryTrend / 170) + (trafficTrend / 220) + (autoscaledRunning * 0.03), 0.85, 1.35);
+  const hourlyRate = overallEstimate / 730;
+
+  return {
+    hourlyRate: Number(hourlyRate.toFixed(2)),
+    nextHourEstimate: Number((hourlyRate * growthMultiplier).toFixed(2)),
+    nextDayEstimate: Number((hourlyRate * 24 * growthMultiplier * 1.04).toFixed(2)),
+    normalizedHourlyEstimate: Number(((overallEstimate - autoscalingPremium) / 730).toFixed(2)),
+    growthMultiplier: Number(growthMultiplier.toFixed(2)),
+    trendSummary: cpuTrend > 1 || memoryTrend > 1 ? 'Rising demand' : cpuTrend < -1 && memoryTrend < -1 ? 'Falling demand' : 'Stable demand'
+  };
+}
+
+export function buildOperationsInsights() {
+  const cost = buildCostSummary();
+  const forecast = buildCostForecast(cost.overallEstimate, cost.breakdown.autoscalingPremium);
+  const alertsCount = state.alerts.length;
+  const healthPressure = Number(((buildOverview().averageCpuUsage + buildOverview().averageMemoryUsage) / 2).toFixed(1));
+  const autoscaledCount = state.vms.filter((vm) => vm.status === 'Running' && vm.createdByAutoscaler).length;
+  const healthScore = clamp(
+    Math.round(
+      100
+      - alertsCount * 5
+      - Math.max(0, buildOverview().averageCpuUsage - 60) * 0.7
+      - Math.max(0, buildOverview().averageMemoryUsage - 65) * 0.5
+      - autoscaledCount * 4
+      - Math.max(0, forecast.growthMultiplier - 1) * 18
+    ),
+    0,
+    100
+  );
+
+  return {
+    health: {
+      score: healthScore,
+      label: healthScore >= 82 ? 'Healthy' : healthScore >= 65 ? 'Watch' : 'At Risk',
+      pressure: healthPressure,
+      alertsCount,
+      autoscaledCount,
+      summary: healthScore >= 82
+        ? 'Traffic is stable and regional load is balanced.'
+        : healthScore >= 65
+          ? 'One or more regions need monitoring before the next scale event.'
+          : 'Regional pressure is elevated and autoscaling is actively compensating.'
+    },
+    forecast: {
+      ...forecast,
+      monthlyEstimate: cost.overallEstimate,
+      autoscalingPremium: cost.breakdown.autoscalingPremium,
+      savingsPotential: Number((cost.breakdown.autoscalingPremium * 1.08).toFixed(2))
+    },
+    regions: cost.regionSummary.map((region) => ({
+      ...region,
+      status: region.trafficPressure > 78 ? 'Hot' : region.trafficPressure > 60 ? 'Warm' : 'Balanced'
+    })),
+    timeline: state.timeline.slice(0, 12)
+  };
+}
+
 export function evaluateAutoscaling() {
   if (!state.metrics.autoscalingEnabled) {
     state.metrics.autoscalingState = 'Disabled';
@@ -271,26 +428,60 @@ export function evaluateAutoscaling() {
     return null;
   }
 
+  const signals = { ...(state.metrics.autoscalingSignals || {}) };
+
   for (const region of regions) {
     const regional = getRegionalRunningVmStats(region);
+    const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
     const hasCapacityPressure =
-      regional.running.length > 0 && regional.running.every((vm) => vm.cpu > policy.cpuThreshold);
+      regional.running.length > 0 && regional.running.every((vm) => vm.cpu >= policy.cpuThreshold) && regionTraffic >= policy.cpuThreshold - 2;
+    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0 };
 
-    if (hasCapacityPressure && regional.running.length < policy.maxVmsPerRegion) {
+    if (hasCapacityPressure) {
+      currentSignal.highStreak += 1;
+      currentSignal.lowStreak = 0;
+    } else {
+      currentSignal.highStreak = 0;
+    }
+
+    signals[region] = currentSignal;
+
+    if (currentSignal.highStreak >= 2 && regional.running.length < policy.maxVmsPerRegion) {
       const created = addAutoscaledVm(region);
       const action = `+1 VM added in ${region}`;
       state.metrics.lastScalingAction = `${action} at ${now()}`;
       state.metrics.lastScalingAt = now();
       state.metrics.autoscalingState = 'Scaling Out';
       appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} because all regional VMs are above ${policy.cpuThreshold}% CPU.` });
+      recordTimelineEvent({
+        type: 'scale-out',
+        region,
+        severity: 'Warning',
+        title: `Autoscaler added VM in ${region}`,
+        details: `All running VMs crossed ${policy.cpuThreshold}% CPU and regional traffic stayed elevated.`,
+        vmName: created.name
+      });
+      state.metrics.autoscalingSignals = signals;
       return { type: 'out', message: action, region, vmName: created.name };
     }
   }
 
   for (const region of regions) {
     const regional = getRegionalRunningVmStats(region);
-    const canScaleIn = regional.autoscaledRunning > 0 && regional.running.length > policy.minVmsPerRegion && regional.averageCpu < policy.cpuThreshold - 12;
+    const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
+    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0 };
+    const canScaleIn = regional.autoscaledRunning > 0 && regional.running.length > policy.minVmsPerRegion && regional.averageCpu < policy.cpuThreshold - 12 && regionTraffic < policy.cpuThreshold - 8;
+
     if (canScaleIn) {
+      currentSignal.lowStreak += 1;
+      currentSignal.highStreak = 0;
+    } else {
+      currentSignal.lowStreak = 0;
+    }
+
+    signals[region] = currentSignal;
+
+    if (currentSignal.lowStreak >= 2) {
       const removed = removeAutoscaledVm(region);
       if (!removed) {
         continue;
@@ -301,9 +492,20 @@ export function evaluateAutoscaling() {
       state.metrics.lastScalingAt = now();
       state.metrics.autoscalingState = 'Scaling In';
       appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} after load normalized in region.` });
+      recordTimelineEvent({
+        type: 'scale-in',
+        region,
+        severity: 'Info',
+        title: `Autoscaler removed VM from ${region}`,
+        details: `Regional traffic normalized and the autoscaler removed the temporary VM.`,
+        vmName: removed.name
+      });
+      state.metrics.autoscalingSignals = signals;
       return { type: 'in', message: action, region, vmName: removed.name };
     }
   }
+
+  state.metrics.autoscalingSignals = signals;
 
   return null;
 }
@@ -321,6 +523,27 @@ export function recordHistoryPoint() {
 }
 
 export function simulateTick() {
+  const previousHotspot = state.metrics.lastTrafficHotspot;
+  const regionTraffic = {};
+
+  regions.forEach((region) => {
+    regionTraffic[region] = generateRegionalTrafficPressure(region);
+  });
+
+  const nextHotspot = Object.entries(regionTraffic).sort((a, b) => b[1] - a[1])[0]?.[0] || regions[0];
+  state.metrics.regionTraffic = regionTraffic;
+  state.metrics.lastTrafficHotspot = nextHotspot;
+
+  if (nextHotspot && nextHotspot !== previousHotspot) {
+    recordTimelineEvent({
+      type: 'traffic',
+      region: nextHotspot,
+      severity: 'Info',
+      title: `Traffic hotspot shifted to ${nextHotspot}`,
+      details: `Automated traffic generator raised regional demand to ${regionTraffic[nextHotspot]}% pressure.`
+    });
+  }
+
   state.vms.forEach((vm) => {
     if (vm.status === 'Stopped') {
       vm.cpu = 0;
@@ -328,8 +551,9 @@ export function simulateTick() {
       return;
     }
 
-    const cpuDelta = (Math.random() - 0.5) * 12 + (vm.spike ? 24 : 0);
-    const memoryDelta = (Math.random() - 0.5) * 8;
+    const regionTarget = Number(regionTraffic[vm.region] ?? 50);
+    const cpuDelta = (regionTarget - vm.cpu) * 0.18 + (Math.random() - 0.5) * 5 + (vm.spike ? 14 : 0);
+    const memoryDelta = (regionTarget - vm.memory) * 0.12 + (Math.random() - 0.5) * 4;
     const diskDelta = Math.random() * 1.4;
 
     vm.cpu = clamp(Number((vm.cpu + cpuDelta).toFixed(1)), 5, 98);
@@ -417,7 +641,8 @@ export function simulateTick() {
     history: state.history,
     alerts: state.alerts,
     logs: state.logs,
-    scalingAction
+    scalingAction,
+    timeline: state.timeline
   };
 }
 
@@ -466,6 +691,7 @@ export function buildCostSummary() {
     const regionalContainers = activeContainers.filter((container) => container.region === region);
     const regionalPods = new Set(regionalContainers.map((container) => container.pod)).size;
     const regionalAutoscaled = regionalVms.filter((vm) => vm.createdByAutoscaler).length;
+    const regionSnapshot = getRegionSnapshot(region);
     const monthlyEstimate = Number(
       (
         regionalVms.length * COST_RATES.vmPerRunning +
@@ -473,7 +699,8 @@ export function buildCostSummary() {
         regionalVms.length * COST_RATES.storagePerRunningVm +
         (regionalVms.length + regionalContainers.length) * COST_RATES.networkPerRunningUnit +
         regionalPods * COST_RATES.podPerGroup +
-        regionalAutoscaled * COST_RATES.autoscaledVmPremium
+        regionalAutoscaled * COST_RATES.autoscaledVmPremium +
+        regionSnapshot.trafficPressure * 0.9
       ).toFixed(2)
     );
 
@@ -483,7 +710,11 @@ export function buildCostSummary() {
       runningVms: regionalVms.length,
       autoscaledVms: regionalAutoscaled,
       activeContainers: regionalContainers.length,
-      pods: regionalPods
+      pods: regionalPods,
+      trafficPressure: regionSnapshot.trafficPressure,
+      averageCpu: regionSnapshot.averageCpu,
+      averageMemory: regionSnapshot.averageMemory,
+      status: regionSnapshot.trafficPressure > 78 ? 'Hot' : regionSnapshot.trafficPressure > 60 ? 'Warm' : 'Balanced'
     };
   });
 
@@ -508,7 +739,8 @@ export function buildCostSummary() {
       autoscaledVmCount: autoscaledRunning,
       optimizationNote
     },
-    autoscalingPolicy: getAutoscalingPolicy()
+    autoscalingPolicy: getAutoscalingPolicy(),
+    forecast: buildCostForecast(overallEstimate, autoscalingPremium)
   };
 }
 

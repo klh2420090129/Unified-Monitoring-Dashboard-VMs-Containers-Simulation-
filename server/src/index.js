@@ -11,12 +11,14 @@ import {
   appendLog,
   buildOverview,
   buildCostSummary,
+  buildOperationsInsights,
   clearAlerts,
   createAlert,
   findUserByEmail,
   generatePredictedIncidents,
   getPodGroups,
   recordHistoryPoint,
+  recordTimelineEvent,
   sampleRegions,
   sanitizeMetrics,
   simulateTick,
@@ -115,6 +117,7 @@ function takeStateSnapshot() {
     containers: structuredClone(state.containers),
     alerts: structuredClone(state.alerts),
     logs: structuredClone(state.logs),
+    timeline: structuredClone(state.timeline),
     history: structuredClone(state.history),
     metrics: structuredClone(state.metrics),
     settings: structuredClone(state.settings)
@@ -138,6 +141,8 @@ async function commitAndBroadcastState() {
   io.emit('containers:update', state.containers);
   io.emit('alerts:update', state.alerts);
   io.emit('logs:update', state.logs);
+  io.emit('timeline:update', state.timeline);
+  io.emit('insights:update', buildOperationsInsights());
 }
 
 app.get('/api/health', async (req, res) => {
@@ -191,6 +196,13 @@ app.put('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
   };
 
   appendLog({ serviceName: 'admin-settings', level: 'INFO', message: 'Thresholds and notification channels updated by administrator.' });
+  recordTimelineEvent({
+    type: 'policy',
+    region: 'global',
+    severity: 'Info',
+    title: 'Autoscaling policy updated',
+    details: `Scale-out threshold set to ${state.settings.autoscalingPolicy.cpuThreshold}% with ${state.settings.autoscalingPolicy.cooldownSeconds}s cooldown.`
+  });
   await commitAndBroadcastState();
 
   res.json({
@@ -228,6 +240,7 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
   await syncFromMongo();
   const name = String(req.params.name || '').toLowerCase();
   rememberAdminMutation(`Run scenario: ${name}`);
+  const selectedRegion = state.metrics.lastTrafficHotspot || sampleRegions[0];
 
   if (name === 'ddos') {
     state.vms.forEach((vm) => {
@@ -238,12 +251,26 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
     });
     state.metrics.network = Math.min(420, state.metrics.network + 120);
     appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario DDOS executed: network surge and CPU pressure injected.' });
+    recordTimelineEvent({
+      type: 'scenario',
+      region: selectedRegion,
+      severity: 'Critical',
+      title: 'DDOS drill executed',
+      details: 'Synthetic traffic surge stressed the entire fleet and prepared the autoscaler for load.'
+    });
   } else if (name === 'memory-leak') {
     state.containers.forEach((container) => {
       container.memory = Math.min(99, container.memory + 26);
       container.status = container.memory > 90 ? 'Warning' : container.status;
     });
     appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario MEMORY-LEAK executed: sustained container memory growth injected.' });
+    recordTimelineEvent({
+      type: 'scenario',
+      region: selectedRegion,
+      severity: 'Warning',
+      title: 'Memory leak drill executed',
+      details: 'Container memory pressure was injected to simulate service degradation.'
+    });
   } else if (name === 'region-outage') {
     state.vms.forEach((vm) => {
       if (vm.region === 'eu-west-1') {
@@ -259,6 +286,13 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
       }
     });
     appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario REGION-OUTAGE executed: eu-west-1 workloads impacted.' });
+    recordTimelineEvent({
+      type: 'scenario',
+      region: 'eu-west-1',
+      severity: 'Critical',
+      title: 'Region outage drill executed',
+      details: 'eu-west-1 workloads were intentionally disrupted to validate failover behavior.'
+    });
   } else if (name === 'recovery') {
     state.vms.forEach((vm) => {
       vm.status = 'Running';
@@ -272,6 +306,13 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
       container.memory = Math.max(12, container.memory - 18);
     });
     appendLog({ serviceName: 'scenario-engine', level: 'INFO', message: 'Scenario RECOVERY executed: workloads stabilized.' });
+    recordTimelineEvent({
+      type: 'scenario',
+      region: selectedRegion,
+      severity: 'Info',
+      title: 'Recovery drill executed',
+      details: 'Synthetic pressure was reduced and the fleet returned toward normal operating range.'
+    });
   } else {
     return res.status(400).json({ message: 'Unsupported scenario preset' });
   }
@@ -283,6 +324,8 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
   io.emit('containers:update', state.containers);
   io.emit('alerts:update', payload.alerts);
   io.emit('logs:update', payload.logs);
+  io.emit('timeline:update', state.timeline);
+  io.emit('insights:update', buildOperationsInsights());
 
   res.json({ name, overview: payload.overview });
 });
@@ -301,6 +344,7 @@ app.post('/api/admin/undo', authRequired, adminOnly, async (req, res) => {
   state.history = structuredClone(lastAdminMutation.snapshot.history);
   state.metrics = structuredClone(lastAdminMutation.snapshot.metrics);
   state.settings = structuredClone(lastAdminMutation.snapshot.settings);
+  state.timeline = structuredClone(lastAdminMutation.snapshot.timeline || state.timeline);
   state.activeAlertKeys = new Set(state.alerts.map((alert) => `${alert.source}:${alert.metric}`));
 
   appendLog({ serviceName: 'admin-control', level: 'INFO', message: `Undo completed for action: ${lastAdminMutation.actionLabel}` });
@@ -706,6 +750,17 @@ app.get('/api/cost', authRequired, async (req, res) => {
   res.json(buildCostSummary());
 });
 
+app.get('/api/timeline', authRequired, async (req, res) => {
+  await syncFromMongo();
+  res.json({ timeline: state.timeline.slice(0, 60) });
+});
+
+app.get('/api/insights', authRequired, async (req, res) => {
+  await syncFromMongo();
+  sanitizeMetrics();
+  res.json(buildOperationsInsights());
+});
+
 app.get('/api/autoscaling', authRequired, async (req, res) => {
   await syncFromMongo();
   sanitizeMetrics();
@@ -732,6 +787,13 @@ app.post('/api/autoscaling', authRequired, adminOnly, async (req, res) => {
     level: 'INFO',
     message: `Autoscaling was ${enabled ? 'enabled' : 'disabled'} by administrator.`
   });
+  recordTimelineEvent({
+    type: 'policy',
+    region: 'global',
+    severity: 'Info',
+    title: `Autoscaling ${enabled ? 'enabled' : 'disabled'}`,
+    details: `Administrator ${enabled ? 'enabled' : 'disabled'} the automatic scaling policy.`
+  });
   await flushToMongo();
 
   const payload = {
@@ -750,6 +812,8 @@ app.post('/api/autoscaling', authRequired, adminOnly, async (req, res) => {
   io.emit('metrics:update', { overview: buildOverview(), history: state.history });
   io.emit('vms:update', state.vms);
   io.emit('containers:update', state.containers);
+  io.emit('timeline:update', state.timeline);
+  io.emit('insights:update', buildOperationsInsights());
 
   res.json(payload);
 });
@@ -814,6 +878,13 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
       message: `Synthetic incident started in ${incidentRegion}: multi-node CPU surge detected.`
     });
     appendLog({ serviceName: 'incident-orchestrator', level: 'ERROR', message: `Incident mode started by administrator in ${incidentRegion}.` });
+    recordTimelineEvent({
+      type: 'incident-start',
+      region: incidentRegion,
+      severity: 'Critical',
+      title: `Incident started in ${incidentRegion}`,
+      details: 'Synthetic incident increased CPU pressure and induced container instability.'
+    });
   } else {
     state.vms.forEach((vm) => {
       vm.cpu = Math.max(12, vm.cpu - 20);
@@ -828,6 +899,13 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
     });
 
     appendLog({ serviceName: 'incident-orchestrator', level: 'INFO', message: 'Incident mode resolved by administrator.' });
+    recordTimelineEvent({
+      type: 'incident-resolve',
+      region: state.metrics.lastTrafficHotspot || sampleRegions[0],
+      severity: 'Info',
+      title: 'Incident resolved',
+      details: 'Metrics returned toward normal and the fleet began stabilizing.'
+    });
   }
 
   const payload = simulateTick();
@@ -838,6 +916,8 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
   io.emit('containers:update', state.containers);
   io.emit('alerts:update', payload.alerts);
   io.emit('logs:update', payload.logs);
+  io.emit('timeline:update', state.timeline);
+  io.emit('insights:update', buildOperationsInsights());
 
   res.json({
     overview: payload.overview,
@@ -855,6 +935,8 @@ io.on('connection', async (socket) => {
   socket.emit('containers:update', state.containers);
   socket.emit('alerts:update', state.alerts);
   socket.emit('logs:update', state.logs);
+  socket.emit('timeline:update', state.timeline);
+  socket.emit('insights:update', buildOperationsInsights());
 });
 
 let tickInProgress = false;
@@ -871,6 +953,8 @@ setInterval(async () => {
     io.emit('containers:update', state.containers);
     io.emit('alerts:update', payload.alerts);
     io.emit('logs:update', payload.logs);
+    io.emit('timeline:update', state.timeline);
+    io.emit('insights:update', buildOperationsInsights());
   } finally {
     tickInProgress = false;
   }

@@ -11,6 +11,7 @@ export function CostAnalysisPanel({ cost, vms, containers }) {
   const projectedTotal = Number((cost?.overallEstimate ?? vmCost + containerCost + storageCost + networkCost + orchestrationCost + autoscalePremium).toFixed(2));
   const optimizedBaseline = Number((cost?.optimization?.baselineWithoutAutoscaled ?? projectedTotal - autoscalePremium).toFixed(2));
   const autoscaledVmCount = Number(cost?.optimization?.autoscaledVmCount ?? 0);
+  const forecast = cost?.forecast || {};
 
   const maxRegion = Math.max(...(cost?.regionSummary || []).map((entry) => entry.monthlyEstimate), 1);
 
@@ -31,6 +32,11 @@ export function CostAnalysisPanel({ cost, vms, containers }) {
           Projected total: <span className="font-semibold">${projectedTotal}/mo</span>
           <div>Without temporary autoscaled VMs: <span className="font-semibold">${optimizedBaseline}/mo</span></div>
           <div>{cost?.optimization?.optimizationNote || 'Costs update from live VM/container capacity.'}</div>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <ForecastCard label="Current hourly" value={forecast?.hourlyRate ?? 0} />
+          <ForecastCard label="Next hour" value={forecast?.nextHourEstimate ?? 0} />
+          <ForecastCard label="Next 24h" value={forecast?.nextDayEstimate ?? 0} />
         </div>
       </div>
 
@@ -75,6 +81,15 @@ function CostTile({ label, value, unit = 'currency' }) {
     <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 dark:border-slate-800 dark:bg-slate-950/60">
       <p className="text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">{label}</p>
       <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-white">{renderedValue}</p>
+    </div>
+  );
+}
+
+function ForecastCard({ label, value }) {
+  return (
+    <div className="rounded-2xl border border-sky-500/20 bg-sky-500/10 px-4 py-3">
+      <p className="text-xs uppercase tracking-[0.3em] text-sky-700 dark:text-sky-300">{label}</p>
+      <p className="mt-2 text-base font-semibold text-slate-950 dark:text-white">${Number(value || 0).toFixed(2)}</p>
     </div>
   );
 }
