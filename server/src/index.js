@@ -134,6 +134,8 @@ async function commitAndBroadcastState() {
   recordHistoryPoint();
   await flushToMongo();
   io.emit('metrics:update', { overview: buildOverview(), history: state.history });
+  io.emit('vms:update', state.vms);
+  io.emit('containers:update', state.containers);
   io.emit('alerts:update', state.alerts);
   io.emit('logs:update', state.logs);
 }
@@ -269,6 +271,8 @@ app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) =
   const payload = simulateTick();
   await flushToMongo();
   io.emit('metrics:update', { overview: payload.overview, history: payload.history, scalingAction: payload.scalingAction || null });
+  io.emit('vms:update', state.vms);
+  io.emit('containers:update', state.containers);
   io.emit('alerts:update', payload.alerts);
   io.emit('logs:update', payload.logs);
 
@@ -736,6 +740,8 @@ app.post('/api/autoscaling', authRequired, adminOnly, async (req, res) => {
 
   io.emit('logs:update', state.logs);
   io.emit('metrics:update', { overview: buildOverview(), history: state.history });
+  io.emit('vms:update', state.vms);
+  io.emit('containers:update', state.containers);
 
   res.json(payload);
 });
@@ -760,9 +766,19 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
   const action = req.body?.action === 'resolve' ? 'resolve' : 'start';
 
   if (action === 'start') {
+    const regionLoad = sampleRegions.map((region) => {
+      const regionVms = state.vms.filter((vm) => vm.region === region && vm.status === 'Running');
+      const averageCpu = regionVms.length
+        ? regionVms.reduce((sum, vm) => sum + vm.cpu, 0) / regionVms.length
+        : 0;
+
+      return { region, averageCpu, vmCount: regionVms.length };
+    });
+    const incidentRegion = regionLoad.sort((a, b) => b.averageCpu - a.averageCpu || b.vmCount - a.vmCount)[0]?.region || sampleRegions[0];
+
     state.vms.forEach((vm, index) => {
       vm.status = 'Running';
-      if (index % 2 === 0) {
+      if (vm.region === incidentRegion || index % 2 === 0) {
         vm.cpu = Math.min(98, vm.cpu + 30);
         vm.memory = Math.min(96, vm.memory + 18);
         vm.spike = true;
@@ -770,9 +786,11 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
     });
 
     state.containers.forEach((container, index) => {
-      container.status = index % 3 === 0 ? 'Crashed' : 'Warning';
-      container.cpu = Math.min(99, container.cpu + 24);
-      container.memory = Math.min(99, container.memory + 16);
+      if (container.region === incidentRegion) {
+        container.status = index % 3 === 0 ? 'Crashed' : 'Warning';
+        container.cpu = Math.min(99, container.cpu + 24);
+        container.memory = Math.min(99, container.memory + 16);
+      }
       if (container.status === 'Crashed') {
         container.restartCount += 1;
       }
@@ -784,9 +802,9 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
       metric: 'CPU',
       value: 96,
       threshold: 85,
-      message: 'Synthetic incident started: multi-node CPU surge detected.'
+      message: `Synthetic incident started in ${incidentRegion}: multi-node CPU surge detected.`
     });
-    appendLog({ serviceName: 'incident-orchestrator', level: 'ERROR', message: 'Incident mode started by administrator.' });
+    appendLog({ serviceName: 'incident-orchestrator', level: 'ERROR', message: `Incident mode started by administrator in ${incidentRegion}.` });
   } else {
     state.vms.forEach((vm) => {
       vm.cpu = Math.max(12, vm.cpu - 20);
@@ -807,6 +825,8 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
   await flushToMongo();
 
   io.emit('metrics:update', { overview: payload.overview, history: payload.history });
+  io.emit('vms:update', state.vms);
+  io.emit('containers:update', state.containers);
   io.emit('alerts:update', payload.alerts);
   io.emit('logs:update', payload.logs);
 
@@ -822,6 +842,8 @@ app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => 
 io.on('connection', async (socket) => {
   await syncFromMongo();
   socket.emit('metrics:update', { overview: buildOverview(), history: state.history });
+  socket.emit('vms:update', state.vms);
+  socket.emit('containers:update', state.containers);
   socket.emit('alerts:update', state.alerts);
   socket.emit('logs:update', state.logs);
 });
@@ -836,6 +858,8 @@ setInterval(async () => {
     const payload = simulateTick();
     await flushToMongo();
     io.emit('metrics:update', { overview: payload.overview, history: payload.history, scalingAction: payload.scalingAction || null });
+    io.emit('vms:update', state.vms);
+    io.emit('containers:update', state.containers);
     io.emit('alerts:update', payload.alerts);
     io.emit('logs:update', payload.logs);
   } finally {

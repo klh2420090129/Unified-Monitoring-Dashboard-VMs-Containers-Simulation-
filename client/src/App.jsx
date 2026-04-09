@@ -134,6 +134,14 @@ export default function App() {
         setMessage(`Autoscaler action: ${payload.scalingAction.message}`);
       }
     });
+    socket.on('vms:update', (incoming) => {
+      setVms(incoming);
+      setLastUpdatedAt(new Date());
+    });
+    socket.on('containers:update', (incoming) => {
+      setContainers(incoming);
+      setLastUpdatedAt(new Date());
+    });
     socket.on('alerts:update', (incoming) => {
       setAlerts(incoming);
       setLastUpdatedAt(new Date());
@@ -164,6 +172,8 @@ export default function App() {
       socket.off('connect');
       socket.off('disconnect');
       socket.off('metrics:update');
+      socket.off('vms:update');
+      socket.off('containers:update');
       socket.off('alerts:update');
       socket.off('logs:update');
       clearInterval(refreshTimer);
@@ -425,6 +435,7 @@ export default function App() {
       setAlerts(payload.alerts || alerts);
       setHistory(payload.history || history);
       setLogs(payload.logs || logs);
+      await refreshCoreData();
       const predictionPayload = await request('/api/predictions', { token: auth.token });
       setPredictions(predictionPayload.predictions || []);
       setLastUpdatedAt(new Date());
