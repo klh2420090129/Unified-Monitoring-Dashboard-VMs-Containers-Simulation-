@@ -5,6 +5,18 @@ const now = () => new Date().toISOString();
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const regions = ['us-east-1', 'us-west-2', 'eu-west-1'];
+const VM_SCALE_OUT_THRESHOLD = 70;
+const VM_SCALE_IN_AVERAGE_THRESHOLD = 52;
+
+const COST_RATES = {
+  vmBase: 47,
+  vmPerRunning: 58,
+  containerPerActive: 12.5,
+  podPerGroup: 10,
+  storagePerRunningVm: 8.5,
+  networkPerRunningUnit: 4.1,
+  autoscaledVmPremium: 16
+};
 
 function createSeedUsers() {
   return [
@@ -20,11 +32,11 @@ function createSeedUsers() {
 
 function createSeedVMs() {
   return [
-    { id: randomUUID(), name: 'vm-prod-01', region: 'us-east-1', status: 'Running', cpu: 34, memory: 41, disk: 56, spike: false },
-    { id: randomUUID(), name: 'vm-prod-02', region: 'us-east-1', status: 'Running', cpu: 52, memory: 63, disk: 72, spike: false },
-    { id: randomUUID(), name: 'vm-stage-01', region: 'eu-west-1', status: 'Stopped', cpu: 0, memory: 0, disk: 29, spike: false },
-    { id: randomUUID(), name: 'vm-tools-01', region: 'us-west-2', status: 'Running', cpu: 21, memory: 27, disk: 33, spike: false },
-    { id: randomUUID(), name: 'vm-batch-01', region: 'us-west-2', status: 'Running', cpu: 67, memory: 58, disk: 69, spike: false }
+    { id: randomUUID(), name: 'vm-prod-01', region: 'us-east-1', status: 'Running', cpu: 34, memory: 41, disk: 56, spike: false, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'vm-prod-02', region: 'us-east-1', status: 'Running', cpu: 52, memory: 63, disk: 72, spike: false, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'vm-stage-01', region: 'eu-west-1', status: 'Stopped', cpu: 0, memory: 0, disk: 29, spike: false, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'vm-tools-01', region: 'us-west-2', status: 'Running', cpu: 21, memory: 27, disk: 33, spike: false, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'vm-batch-01', region: 'us-west-2', status: 'Running', cpu: 67, memory: 58, disk: 69, spike: false, createdByAutoscaler: false }
   ];
 }
 
@@ -66,6 +78,8 @@ export function createInitialState() {
   const historySeed = createSeedHistory();
   const logsSeed = createSeedLogs();
 
+  const autoscaledVmCount = seededVMs.filter((vm) => vm.createdByAutoscaler).length;
+
   return {
     users: seededUsers,
     vms: seededVMs,
@@ -92,11 +106,12 @@ export function createInitialState() {
       network: 128,
       totalVmRunning: seededVMs.filter((vm) => vm.status === 'Running').length,
       totalContainersRunning: seededContainers.length,
-      costEstimate: 246.5,
+      costEstimate: 0,
       autoscalingState: 'Stable',
       autoscalingEnabled: true,
       lastScalingAction: 'No scaling action yet',
-      lastScalingAt: null
+      lastScalingAt: null,
+      autoscaledVmCount
     }
   };
 }
@@ -163,6 +178,7 @@ export function sanitizeMetrics() {
 
   const shouldScaleOut = cpu > 80 || memory > 85;
   const shouldScaleIn = cpu < 30 && memory < 35;
+  const costSummary = buildCostSummary();
 
   state.metrics = {
     ...state.metrics,
@@ -171,40 +187,56 @@ export function sanitizeMetrics() {
     network: Number(network.toFixed(1)),
     totalVmRunning: runningVMs.length,
     totalContainersRunning: runningContainers.length,
-    costEstimate: Number((180 + runningVMs.length * 12.4 + runningContainers.length * 4.8).toFixed(2)),
+    costEstimate: costSummary.overallEstimate,
+    autoscaledVmCount: state.vms.filter((vm) => vm.createdByAutoscaler && vm.status === 'Running').length,
     autoscalingState: state.metrics.autoscalingEnabled ? (shouldScaleOut ? 'Scaling Out' : shouldScaleIn ? 'Scaling In' : 'Stable') : 'Disabled'
   };
 
   return state.metrics;
 }
 
-function addAutoscaledContainers(count) {
-  const basePod = state.containers[0]?.pod || 'pod-autoscale';
-  const baseRegion = state.containers[0]?.region || regions[0];
+function addAutoscaledVm(region) {
+  const existingRegional = state.vms.filter((vm) => vm.region === region).length;
+  const vm = {
+    id: randomUUID(),
+    name: `vm-autoscale-${region}-${existingRegional + 1}`,
+    region,
+    status: 'Running',
+    cpu: 26,
+    memory: 30,
+    disk: 25,
+    spike: false,
+    createdByAutoscaler: true
+  };
 
-  for (let index = 0; index < count; index += 1) {
-    state.containers.push({
-      id: randomUUID(),
-      name: `autoscale-${Math.floor(Math.random() * 9000) + 1000}`,
-      pod: basePod,
-      region: baseRegion,
-      status: 'Healthy',
-      cpu: 18,
-      memory: 24,
-      restartCount: 0
-    });
-  }
+  state.vms.push(vm);
+  return vm;
 }
 
-function removeAutoscaledContainers(count) {
-  let removed = 0;
-  while (removed < count && state.containers.length > 4) {
-    const candidateIndex = state.containers.findIndex((container) => container.name.startsWith('autoscale-') || container.cpu < 25);
-    if (candidateIndex === -1) break;
-    state.containers.splice(candidateIndex, 1);
-    removed += 1;
+function removeAutoscaledVm(region) {
+  const runningInRegion = state.vms.filter((vm) => vm.region === region && vm.status === 'Running');
+  const autoscaledCandidate = runningInRegion.find((vm) => vm.createdByAutoscaler);
+
+  if (!autoscaledCandidate || runningInRegion.length <= 1) {
+    return null;
   }
-  return removed;
+
+  state.vms = state.vms.filter((vm) => vm.id !== autoscaledCandidate.id);
+  return autoscaledCandidate;
+}
+
+function getRegionalRunningVmStats(region) {
+  const running = state.vms.filter((vm) => vm.region === region && vm.status === 'Running');
+  const autoscaledRunning = running.filter((vm) => vm.createdByAutoscaler).length;
+  const averageCpu = running.length
+    ? running.reduce((sum, vm) => sum + vm.cpu, 0) / running.length
+    : 0;
+
+  return {
+    running,
+    autoscaledRunning,
+    averageCpu
+  };
 }
 
 export function evaluateAutoscaling() {
@@ -219,25 +251,37 @@ export function evaluateAutoscaling() {
     return null;
   }
 
-  if (state.metrics.cpu > 80 || state.metrics.memory > 85) {
-    addAutoscaledContainers(2);
-    const action = '+2 containers added';
-    state.metrics.lastScalingAction = `${action} at ${now()}`;
-    state.metrics.lastScalingAt = now();
-    state.metrics.autoscalingState = 'Scaling Out';
-    appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} due to high load.` });
-    return { type: 'out', message: action };
+  for (const region of regions) {
+    const regional = getRegionalRunningVmStats(region);
+    const hasCapacityPressure =
+      regional.running.length > 0 && regional.running.every((vm) => vm.cpu > VM_SCALE_OUT_THRESHOLD);
+
+    if (hasCapacityPressure) {
+      const created = addAutoscaledVm(region);
+      const action = `+1 VM added in ${region}`;
+      state.metrics.lastScalingAction = `${action} at ${now()}`;
+      state.metrics.lastScalingAt = now();
+      state.metrics.autoscalingState = 'Scaling Out';
+      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} because all regional VMs are above ${VM_SCALE_OUT_THRESHOLD}% CPU.` });
+      return { type: 'out', message: action, region, vmName: created.name };
+    }
   }
 
-  if (state.metrics.cpu < 30 && state.metrics.memory < 35) {
-    const removed = removeAutoscaledContainers(1);
-    if (removed > 0) {
-      const action = `-${removed} container removed`;
+  for (const region of regions) {
+    const regional = getRegionalRunningVmStats(region);
+    const canScaleIn = regional.autoscaledRunning > 0 && regional.averageCpu < VM_SCALE_IN_AVERAGE_THRESHOLD;
+    if (canScaleIn) {
+      const removed = removeAutoscaledVm(region);
+      if (!removed) {
+        continue;
+      }
+
+      const action = `-1 autoscaled VM removed from ${region}`;
       state.metrics.lastScalingAction = `${action} at ${now()}`;
       state.metrics.lastScalingAt = now();
       state.metrics.autoscalingState = 'Scaling In';
-      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} during low demand.` });
-      return { type: 'in', message: action };
+      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} after load normalized in region.` });
+      return { type: 'in', message: action, region, vmName: removed.name };
     }
   }
 
@@ -370,7 +414,80 @@ export function buildOverview() {
     networkThroughput: state.metrics.network,
     activeAlerts: state.alerts.length,
     costEstimate: state.metrics.costEstimate,
-    autoscalingState: state.metrics.autoscalingState
+    autoscalingState: state.metrics.autoscalingState,
+    autoscaledVmCount: state.metrics.autoscaledVmCount || 0
+  };
+}
+
+export function buildCostSummary() {
+  const runningVms = state.vms.filter((vm) => vm.status === 'Running');
+  const activeContainers = state.containers.filter((container) => container.status !== 'Crashed');
+  const autoscaledRunning = runningVms.filter((vm) => vm.createdByAutoscaler).length;
+
+  const podCount = new Set(
+    activeContainers
+      .filter((container) => container.pod)
+      .map((container) => container.pod)
+  ).size;
+
+  const vmCompute = COST_RATES.vmBase + runningVms.length * COST_RATES.vmPerRunning;
+  const containerCompute = activeContainers.length * COST_RATES.containerPerActive;
+  const storage = runningVms.length * COST_RATES.storagePerRunningVm;
+  const network = (runningVms.length + activeContainers.length) * COST_RATES.networkPerRunningUnit;
+  const orchestration = podCount * COST_RATES.podPerGroup;
+  const autoscalingPremium = autoscaledRunning * COST_RATES.autoscaledVmPremium;
+
+  const overallEstimate = Number(
+    (vmCompute + containerCompute + storage + network + orchestration + autoscalingPremium).toFixed(2)
+  );
+
+  const regionSummary = regions.map((region) => {
+    const regionalVms = runningVms.filter((vm) => vm.region === region);
+    const regionalContainers = activeContainers.filter((container) => container.region === region);
+    const regionalPods = new Set(regionalContainers.map((container) => container.pod)).size;
+    const regionalAutoscaled = regionalVms.filter((vm) => vm.createdByAutoscaler).length;
+    const monthlyEstimate = Number(
+      (
+        regionalVms.length * COST_RATES.vmPerRunning +
+        regionalContainers.length * COST_RATES.containerPerActive +
+        regionalVms.length * COST_RATES.storagePerRunningVm +
+        (regionalVms.length + regionalContainers.length) * COST_RATES.networkPerRunningUnit +
+        regionalPods * COST_RATES.podPerGroup +
+        regionalAutoscaled * COST_RATES.autoscaledVmPremium
+      ).toFixed(2)
+    );
+
+    return {
+      region,
+      monthlyEstimate,
+      runningVms: regionalVms.length,
+      autoscaledVms: regionalAutoscaled,
+      activeContainers: regionalContainers.length,
+      pods: regionalPods
+    };
+  });
+
+  const baselineWithoutAutoscaled = Number((overallEstimate - autoscalingPremium).toFixed(2));
+  const optimizationNote = autoscaledRunning > 0
+    ? `Autoscaler currently runs ${autoscaledRunning} extra VM(s); cost should drop after scale-in.`
+    : 'No temporary autoscaled VM cost right now.';
+
+  return {
+    regionSummary,
+    overallEstimate,
+    breakdown: {
+      vmCompute: Number(vmCompute.toFixed(2)),
+      containerCompute: Number(containerCompute.toFixed(2)),
+      storage: Number(storage.toFixed(2)),
+      network: Number(network.toFixed(2)),
+      orchestration: Number(orchestration.toFixed(2)),
+      autoscalingPremium: Number(autoscalingPremium.toFixed(2))
+    },
+    optimization: {
+      baselineWithoutAutoscaled,
+      autoscaledVmCount: autoscaledRunning,
+      optimizationNote
+    }
   };
 }
 

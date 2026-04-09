@@ -10,6 +10,7 @@ import { connectMongo, loadStateFromMongo, persistState, seedFromState } from '.
 import {
   appendLog,
   buildOverview,
+  buildCostSummary,
   clearAlerts,
   createAlert,
   findUserByEmail,
@@ -375,7 +376,8 @@ app.post('/api/vms', authRequired, adminOnly, async (req, res) => {
     cpu: 18,
     memory: 24,
     disk: 20,
-    spike: false
+    spike: false,
+    createdByAutoscaler: false
   };
 
   state.vms.push(vm);
@@ -688,13 +690,8 @@ app.get('/api/history', authRequired, async (req, res) => {
 
 app.get('/api/cost', authRequired, async (req, res) => {
   await syncFromMongo();
-  res.json({
-    regionSummary: sampleRegions.map((region) => ({
-      region,
-      monthlyEstimate: Number((state.metrics.costEstimate / sampleRegions.length + (region === 'us-east-1' ? 12 : 0)).toFixed(2))
-    })),
-    overallEstimate: state.metrics.costEstimate
-  });
+  sanitizeMetrics();
+  res.json(buildCostSummary());
 });
 
 app.get('/api/autoscaling', authRequired, async (req, res) => {
@@ -706,9 +703,9 @@ app.get('/api/autoscaling', authRequired, async (req, res) => {
     lastScalingAction: state.metrics.lastScalingAction || 'No scaling action yet',
     lastScalingAt: state.metrics.lastScalingAt,
     recommendedAction: state.metrics.autoscalingState === 'Scaling Out'
-      ? 'Scale out stateless pods by 2 replicas'
+      ? 'Scale out by adding one VM in the saturated region'
       : state.metrics.autoscalingState === 'Scaling In'
-        ? 'Scale in by 1 replica to optimize cost'
+        ? 'Scale in by removing one autoscaled VM from normalized region'
         : 'No changes needed'
   });
 });
@@ -731,9 +728,9 @@ app.post('/api/autoscaling', authRequired, adminOnly, async (req, res) => {
     lastScalingAction: state.metrics.lastScalingAction || 'No scaling action yet',
     lastScalingAt: state.metrics.lastScalingAt,
     recommendedAction: state.metrics.autoscalingState === 'Scaling Out'
-      ? 'Scale out stateless pods by 2 replicas'
+      ? 'Scale out by adding one VM in the saturated region'
       : state.metrics.autoscalingState === 'Scaling In'
-        ? 'Scale in by 1 replica to optimize cost'
+        ? 'Scale in by removing one autoscaled VM from normalized region'
         : 'No changes needed'
   };
 

@@ -227,14 +227,16 @@ export default function App() {
   );
 
   async function refreshCoreData() {
-    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, auditPayload] = await Promise.all([
+    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, auditPayload, costPayload, autoscalingPayload] = await Promise.all([
       request('/api/dashboard/overview', { token: auth.token }),
       request('/api/vms', { token: auth.token }),
       request('/api/containers', { token: auth.token }),
       request('/api/alerts', { token: auth.token }),
       request('/api/history', { token: auth.token }),
       request('/api/logs', { token: auth.token }),
-      canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] })
+      canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] }),
+      request('/api/cost', { token: auth.token }),
+      request('/api/autoscaling', { token: auth.token })
     ]);
 
     setOverview(overviewPayload.overview);
@@ -245,6 +247,8 @@ export default function App() {
     setHistory(historyPayload.history);
     setLogs(logsPayload.logs);
     setAuditLogs(auditPayload.auditLogs || []);
+    setCost(costPayload);
+    setAutoscaling(autoscalingPayload);
     setLastUpdatedAt(new Date());
   }
 
