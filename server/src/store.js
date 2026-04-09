@@ -74,6 +74,18 @@ export function createInitialState() {
     logs: logsSeed,
     history: historySeed,
     activeAlertKeys: new Set(),
+    settings: {
+      thresholds: {
+        cpu: 85,
+        memory: 90
+      },
+      notifications: {
+        email: true,
+        slack: false,
+        teams: false,
+        webhookUrl: ''
+      }
+    },
     metrics: {
       cpu: 42,
       memory: 51,
@@ -291,8 +303,13 @@ export function simulateTick() {
     sanitizeMetrics();
   }
 
-  const cpuSeverity = state.metrics.cpu > 95 ? 'Critical' : state.metrics.cpu > 85 ? 'Warning' : null;
-  const memorySeverity = state.metrics.memory > 95 ? 'Critical' : state.metrics.memory > 90 ? 'Warning' : null;
+  const cpuThreshold = Number(state.settings?.thresholds?.cpu ?? 85);
+  const memoryThreshold = Number(state.settings?.thresholds?.memory ?? 90);
+  const cpuCriticalThreshold = cpuThreshold + 10;
+  const memoryCriticalThreshold = memoryThreshold + 8;
+
+  const cpuSeverity = state.metrics.cpu > cpuCriticalThreshold ? 'Critical' : state.metrics.cpu > cpuThreshold ? 'Warning' : null;
+  const memorySeverity = state.metrics.memory > memoryCriticalThreshold ? 'Critical' : state.metrics.memory > memoryThreshold ? 'Warning' : null;
 
   if (cpuSeverity) {
     createAlert({
@@ -300,7 +317,7 @@ export function simulateTick() {
       severity: cpuSeverity,
       metric: 'CPU',
       value: state.metrics.cpu,
-      threshold: 85,
+      threshold: cpuThreshold,
       message: `CPU utilization is at ${state.metrics.cpu}%`
     });
     appendLog({ serviceName: 'monitoring-agent', level: 'ERROR', message: `CPU threshold breached at ${state.metrics.cpu}%` });
@@ -312,7 +329,7 @@ export function simulateTick() {
       severity: memorySeverity,
       metric: 'Memory',
       value: state.metrics.memory,
-      threshold: 90,
+      threshold: memoryThreshold,
       message: `Memory utilization is at ${state.metrics.memory}%`
     });
     appendLog({ serviceName: 'monitoring-agent', level: 'ERROR', message: `Memory threshold breached at ${state.metrics.memory}%` });

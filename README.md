@@ -18,6 +18,12 @@ A full-stack cloud monitoring simulation for VMs and container workloads, built 
 - Expandable pod groups with container drilldown
 - Cost analysis and autoscaling simulation panels
 - Service dependency graph / architecture view
+- Full Admin control plane: add/delete/start/stop/restart VMs and containers
+- Pod lifecycle controls: create, delete, and scale in/out
+- Admin Ops panel with scenario presets (DDoS, memory leak, region outage, recovery)
+- Editable alert thresholds (CPU/Memory) and notification channel toggles
+- Admin undo for the last control action
+- Audit Trail page for administrator actions
 - Dark mode toggle
 - Docker and Docker Compose support
 
@@ -85,6 +91,16 @@ docker compose up --build
 5. Keep the instance stopped when you are not demoing to save credits.
 
 The repo also includes `ec2-helper.ps1` for local SSH access using the `.pem` key in the project folder.
+
+### GitHub Actions CI/CD
+
+The workflow at `.github/workflows/deploy-ec2.yml` can auto-deploy on pushes to `main`.
+
+Required repository secrets:
+
+- `EC2_HOST`
+- `EC2_USER`
+- `EC2_SSH_KEY`
 
 ### Azure
 

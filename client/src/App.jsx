@@ -16,6 +16,8 @@ import { AboutPanel } from './components/AboutPanel';
 import { PredictionsPanel } from './components/PredictionsPanel';
 import { CostAnalysisPanel } from './components/CostAnalysisPanel';
 import { DependencyGraphPanel } from './components/DependencyGraphPanel';
+import { AdminOpsPanel } from './components/AdminOpsPanel';
+import { AuditTrailPanel } from './components/AuditTrailPanel';
 
 const runtimeSocketBase =
   import.meta.env.VITE_API_URL?.trim() || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000');
@@ -36,7 +38,7 @@ const defaultOverview = {
   autoscalingState: 'Stable'
 };
 
-const navItems = ['Dashboard', 'VMs', 'Containers', 'Alerts', 'Logs', 'Settings', 'Cost Analysis', 'Architecture', 'About'];
+const navItems = ['Dashboard', 'VMs', 'Containers', 'Alerts', 'Logs', 'Settings', 'Admin Ops', 'Audit', 'Cost Analysis', 'Architecture', 'About'];
 
 export default function App() {
   const auth = useAuth();
@@ -53,6 +55,8 @@ export default function App() {
   const [cost, setCost] = useState(null);
   const [autoscaling, setAutoscaling] = useState(null);
   const [predictions, setPredictions] = useState([]);
+  const [adminSettings, setAdminSettings] = useState(null);
+  const [auditLogs, setAuditLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [logLevel, setLogLevel] = useState('ALL');
   const [authMode, setAuthMode] = useState('login');
@@ -86,9 +90,11 @@ export default function App() {
       request('/api/settings', { token: auth.token }),
       request('/api/cost', { token: auth.token }),
       request('/api/autoscaling', { token: auth.token }),
-      request('/api/predictions', { token: auth.token })
+      request('/api/predictions', { token: auth.token }),
+      canManage ? request('/api/admin/settings', { token: auth.token }) : Promise.resolve(null),
+      canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] })
     ])
-      .then(([overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, settingsPayload, costPayload, autoscalingPayload, predictionsPayload]) => {
+      .then(([overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, settingsPayload, costPayload, autoscalingPayload, predictionsPayload, adminSettingsPayload, auditPayload]) => {
         if (!mounted) return;
         setOverview(overviewPayload.overview);
         setRegions(settingsPayload.regions);
@@ -101,6 +107,8 @@ export default function App() {
         setCost(costPayload);
         setAutoscaling(autoscalingPayload);
         setPredictions(predictionsPayload.predictions || []);
+        setAdminSettings(adminSettingsPayload);
+        setAuditLogs(auditPayload.auditLogs || []);
         setLastUpdatedAt(new Date());
       })
       .catch((error) => setMessage(error.message))
@@ -161,7 +169,7 @@ export default function App() {
       clearInterval(refreshTimer);
       socket.disconnect();
     };
-  }, [auth.token]);
+  }, [auth.token, canManage]);
 
   useEffect(() => {
     const previous = previousOverviewRef.current;
@@ -219,13 +227,14 @@ export default function App() {
   );
 
   async function refreshCoreData() {
-    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload] = await Promise.all([
+    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload, auditPayload] = await Promise.all([
       request('/api/dashboard/overview', { token: auth.token }),
       request('/api/vms', { token: auth.token }),
       request('/api/containers', { token: auth.token }),
       request('/api/alerts', { token: auth.token }),
       request('/api/history', { token: auth.token }),
-      request('/api/logs', { token: auth.token })
+      request('/api/logs', { token: auth.token }),
+      canManage ? request('/api/audit', { token: auth.token }) : Promise.resolve({ auditLogs: [] })
     ]);
 
     setOverview(overviewPayload.overview);
@@ -235,6 +244,7 @@ export default function App() {
     setAlerts(alertsPayload.alerts);
     setHistory(historyPayload.history);
     setLogs(logsPayload.logs);
+    setAuditLogs(auditPayload.auditLogs || []);
     setLastUpdatedAt(new Date());
   }
 
@@ -334,6 +344,58 @@ export default function App() {
       await request(`/api/pods/${encodeURIComponent(pod)}`, { token: auth.token, method: 'DELETE' });
       await refreshCoreData();
       setMessage(`Pod ${pod} deleted.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleSaveAdminSettings(payload) {
+    try {
+      const updated = await request('/api/admin/settings', {
+        token: auth.token,
+        method: 'PUT',
+        body: payload
+      });
+      setAdminSettings(updated);
+      await refreshCoreData();
+      setMessage('Admin settings updated.');
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleUndoAdminAction() {
+    try {
+      const payload = await request('/api/admin/undo', { token: auth.token, method: 'POST' });
+      await refreshCoreData();
+      setMessage(payload.message || 'Undo completed.');
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleRunScenario(name) {
+    try {
+      await request(`/api/scenarios/${name}/run`, {
+        token: auth.token,
+        method: 'POST'
+      });
+      await refreshCoreData();
+      setMessage(`Scenario ${name} executed.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleSendTestNotification(channel) {
+    try {
+      const payload = await request('/api/notifications/test', {
+        token: auth.token,
+        method: 'POST',
+        body: { channel }
+      });
+      await refreshCoreData();
+      setMessage(payload.sent ? `Test ${channel} notification sent.` : `${channel} channel is not configured.`);
     } catch (error) {
       setMessage(error.message);
     }
@@ -646,6 +708,17 @@ export default function App() {
         />
       )}
       {activeView === 'Cost Analysis' && <CostAnalysisPanel cost={cost} vms={vms} containers={containers} />}
+      {activeView === 'Admin Ops' && (
+        <AdminOpsPanel
+          canManage={canManage}
+          settings={adminSettings}
+          onSaveSettings={handleSaveAdminSettings}
+          onUndo={handleUndoAdminAction}
+          onRunScenario={handleRunScenario}
+          onSendTestNotification={handleSendTestNotification}
+        />
+      )}
+      {activeView === 'Audit' && <AuditTrailPanel logs={auditLogs} />}
       {activeView === 'Architecture' && <DependencyGraphPanel />}
       {activeView === 'About' && <AboutPanel />}
     </Layout>

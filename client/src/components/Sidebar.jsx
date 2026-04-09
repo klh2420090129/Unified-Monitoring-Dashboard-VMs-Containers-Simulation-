@@ -1,4 +1,4 @@
-const navItems = ['Dashboard', 'VMs', 'Containers', 'Alerts', 'Logs', 'Settings', 'Cost Analysis', 'Architecture', 'About'];
+const navItems = ['Dashboard', 'VMs', 'Containers', 'Alerts', 'Logs', 'Settings', 'Admin Ops', 'Audit', 'Cost Analysis', 'Architecture', 'About'];
 
 export function Sidebar({ activeView, setActiveView, overview, user, pods, regions, onSignOut }) {
   return (

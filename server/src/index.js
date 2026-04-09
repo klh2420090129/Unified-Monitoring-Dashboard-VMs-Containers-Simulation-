@@ -106,6 +106,28 @@ async function flushToMongo() {
   await persistState(state);
 }
 
+let lastAdminMutation = null;
+
+function takeStateSnapshot() {
+  return {
+    vms: structuredClone(state.vms),
+    containers: structuredClone(state.containers),
+    alerts: structuredClone(state.alerts),
+    logs: structuredClone(state.logs),
+    history: structuredClone(state.history),
+    metrics: structuredClone(state.metrics),
+    settings: structuredClone(state.settings)
+  };
+}
+
+function rememberAdminMutation(actionLabel) {
+  lastAdminMutation = {
+    actionLabel,
+    capturedAt: new Date().toISOString(),
+    snapshot: takeStateSnapshot()
+  };
+}
+
 async function commitAndBroadcastState() {
   sanitizeMetrics();
   recordHistoryPoint();
@@ -118,6 +140,161 @@ async function commitAndBroadcastState() {
 app.get('/api/health', async (req, res) => {
   await syncFromMongo();
   res.json({ status: 'ok', regions: sampleRegions });
+});
+
+app.get('/api/audit', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+  const auditLogs = state.logs.filter((entry) =>
+    /administrator|admin|autoscaler|incident|pod|container|vm/i.test(`${entry.serviceName} ${entry.message}`)
+  );
+  res.json({ auditLogs: auditLogs.slice(0, 120) });
+});
+
+app.get('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+  res.json({
+    thresholds: state.settings?.thresholds || { cpu: 85, memory: 90 },
+    notifications: state.settings?.notifications || { email: true, slack: false, teams: false, webhookUrl: '' }
+  });
+});
+
+app.put('/api/admin/settings', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+  rememberAdminMutation('Update admin settings');
+
+  const nextCpu = Number(req.body?.thresholds?.cpu ?? state.settings?.thresholds?.cpu ?? 85);
+  const nextMemory = Number(req.body?.thresholds?.memory ?? state.settings?.thresholds?.memory ?? 90);
+
+  state.settings = {
+    ...(state.settings || {}),
+    thresholds: {
+      cpu: Math.max(55, Math.min(98, Number.isNaN(nextCpu) ? 85 : nextCpu)),
+      memory: Math.max(60, Math.min(98, Number.isNaN(nextMemory) ? 90 : nextMemory))
+    },
+    notifications: {
+      ...(state.settings?.notifications || {}),
+      email: Boolean(req.body?.notifications?.email),
+      slack: Boolean(req.body?.notifications?.slack),
+      teams: Boolean(req.body?.notifications?.teams),
+      webhookUrl: String(req.body?.notifications?.webhookUrl || '')
+    }
+  };
+
+  appendLog({ serviceName: 'admin-settings', level: 'INFO', message: 'Thresholds and notification channels updated by administrator.' });
+  await commitAndBroadcastState();
+
+  res.json({
+    thresholds: state.settings.thresholds,
+    notifications: state.settings.notifications
+  });
+});
+
+app.post('/api/notifications/test', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+  const channel = String(req.body?.channel || 'email').toLowerCase();
+  const allowed = ['email', 'slack', 'teams', 'webhook'];
+  if (!allowed.includes(channel)) {
+    return res.status(400).json({ message: 'Unsupported channel' });
+  }
+
+  const configured = channel === 'webhook'
+    ? Boolean(state.settings?.notifications?.webhookUrl)
+    : Boolean(state.settings?.notifications?.[channel]);
+
+  appendLog({
+    serviceName: 'notification-engine',
+    level: configured ? 'INFO' : 'ERROR',
+    message: configured
+      ? `Test notification sent to ${channel} channel.`
+      : `Notification channel ${channel} is not configured/enabled.`
+  });
+
+  await commitAndBroadcastState();
+  res.json({ channel, configured, sent: configured });
+});
+
+app.post('/api/scenarios/:name/run', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+  const name = String(req.params.name || '').toLowerCase();
+  rememberAdminMutation(`Run scenario: ${name}`);
+
+  if (name === 'ddos') {
+    state.vms.forEach((vm) => {
+      vm.status = 'Running';
+      vm.cpu = Math.min(99, vm.cpu + 35);
+      vm.memory = Math.min(98, vm.memory + 15);
+      vm.spike = true;
+    });
+    state.metrics.network = Math.min(420, state.metrics.network + 120);
+    appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario DDOS executed: network surge and CPU pressure injected.' });
+  } else if (name === 'memory-leak') {
+    state.containers.forEach((container) => {
+      container.memory = Math.min(99, container.memory + 26);
+      container.status = container.memory > 90 ? 'Warning' : container.status;
+    });
+    appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario MEMORY-LEAK executed: sustained container memory growth injected.' });
+  } else if (name === 'region-outage') {
+    state.vms.forEach((vm) => {
+      if (vm.region === 'eu-west-1') {
+        vm.status = 'Stopped';
+        vm.cpu = 0;
+        vm.memory = 0;
+      }
+    });
+    state.containers.forEach((container) => {
+      if (container.region === 'eu-west-1') {
+        container.status = 'Crashed';
+        container.restartCount += 1;
+      }
+    });
+    appendLog({ serviceName: 'scenario-engine', level: 'ERROR', message: 'Scenario REGION-OUTAGE executed: eu-west-1 workloads impacted.' });
+  } else if (name === 'recovery') {
+    state.vms.forEach((vm) => {
+      vm.status = 'Running';
+      vm.cpu = Math.max(12, vm.cpu - 20);
+      vm.memory = Math.max(18, vm.memory - 15);
+      vm.spike = false;
+    });
+    state.containers.forEach((container) => {
+      container.status = 'Healthy';
+      container.cpu = Math.max(8, container.cpu - 18);
+      container.memory = Math.max(12, container.memory - 18);
+    });
+    appendLog({ serviceName: 'scenario-engine', level: 'INFO', message: 'Scenario RECOVERY executed: workloads stabilized.' });
+  } else {
+    return res.status(400).json({ message: 'Unsupported scenario preset' });
+  }
+
+  const payload = simulateTick();
+  await flushToMongo();
+  io.emit('metrics:update', { overview: payload.overview, history: payload.history, scalingAction: payload.scalingAction || null });
+  io.emit('alerts:update', payload.alerts);
+  io.emit('logs:update', payload.logs);
+
+  res.json({ name, overview: payload.overview });
+});
+
+app.post('/api/admin/undo', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  if (!lastAdminMutation?.snapshot) {
+    return res.status(400).json({ message: 'No admin action to undo.' });
+  }
+
+  state.vms = structuredClone(lastAdminMutation.snapshot.vms);
+  state.containers = structuredClone(lastAdminMutation.snapshot.containers);
+  state.alerts = structuredClone(lastAdminMutation.snapshot.alerts);
+  state.logs = structuredClone(lastAdminMutation.snapshot.logs);
+  state.history = structuredClone(lastAdminMutation.snapshot.history);
+  state.metrics = structuredClone(lastAdminMutation.snapshot.metrics);
+  state.settings = structuredClone(lastAdminMutation.snapshot.settings);
+  state.activeAlertKeys = new Set(state.alerts.map((alert) => `${alert.source}:${alert.metric}`));
+
+  appendLog({ serviceName: 'admin-control', level: 'INFO', message: `Undo completed for action: ${lastAdminMutation.actionLabel}` });
+  lastAdminMutation = null;
+  await commitAndBroadcastState();
+
+  res.json({ message: 'Undo completed successfully.' });
 });
 
 app.post('/api/auth/signup', async (req, res) => {
@@ -181,6 +358,7 @@ app.get('/api/vms', authRequired, async (req, res) => {
 
 app.post('/api/vms', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Create VM');
 
   const name = String(req.body?.name || '').trim();
   const region = sampleRegions.includes(req.body?.region) ? req.body.region : sampleRegions[0];
@@ -209,6 +387,7 @@ app.post('/api/vms', authRequired, adminOnly, async (req, res) => {
 
 app.delete('/api/vms/:id', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Delete VM');
 
   if (state.vms.length <= 1) {
     return res.status(400).json({ message: 'At least one VM must remain in the simulation.' });
@@ -228,6 +407,7 @@ app.delete('/api/vms/:id', authRequired, adminOnly, async (req, res) => {
 
 app.post('/api/vms/:id/action', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation(`VM action ${String(req.body?.action || '').toLowerCase()}`);
   const vm = state.vms.find((entry) => entry.id === req.params.id);
 
   if (!vm) {
@@ -290,6 +470,7 @@ app.get('/api/containers', authRequired, async (req, res) => {
 
 app.post('/api/containers', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Create container');
 
   const name = String(req.body?.name || '').trim();
   const pod = String(req.body?.pod || '').trim();
@@ -319,6 +500,7 @@ app.post('/api/containers', authRequired, adminOnly, async (req, res) => {
 
 app.post('/api/containers/:id/action', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation(`Container action ${String(req.body?.action || '').toLowerCase()}`);
 
   const container = state.containers.find((entry) => entry.id === req.params.id);
   if (!container) {
@@ -353,6 +535,7 @@ app.post('/api/containers/:id/action', authRequired, adminOnly, async (req, res)
 
 app.delete('/api/containers/:id', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Delete container');
 
   if (state.containers.length <= 1) {
     return res.status(400).json({ message: 'At least one container must remain in the simulation.' });
@@ -371,6 +554,7 @@ app.delete('/api/containers/:id', authRequired, adminOnly, async (req, res) => {
 
 app.post('/api/pods', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Create pod');
 
   const pod = String(req.body?.pod || '').trim();
   const region = sampleRegions.includes(req.body?.region) ? req.body.region : sampleRegions[0];
@@ -403,6 +587,7 @@ app.post('/api/pods', authRequired, adminOnly, async (req, res) => {
 
 app.post('/api/pods/:pod/scale', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Scale pod');
 
   const podName = req.params.pod;
   const delta = Number(req.body?.delta || 0);
@@ -454,6 +639,7 @@ app.post('/api/pods/:pod/scale', authRequired, adminOnly, async (req, res) => {
 
 app.delete('/api/pods/:pod', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
+  rememberAdminMutation('Delete pod');
 
   const podName = req.params.pod;
   const totalPodCount = new Set(state.containers.map((container) => container.pod)).size;
@@ -563,8 +749,13 @@ app.get('/api/predictions', authRequired, async (req, res) => {
   res.json({ predictions: generatePredictedIncidents(limit) });
 });
 
-app.get('/api/settings', authRequired, (req, res) => {
-  res.json({ regions: sampleRegions, alertThresholds: { cpu: 85, memory: 90 } });
+app.get('/api/settings', authRequired, async (req, res) => {
+  await syncFromMongo();
+  res.json({
+    regions: sampleRegions,
+    alertThresholds: state.settings?.thresholds || { cpu: 85, memory: 90 },
+    notifications: state.settings?.notifications || { email: true, slack: false, teams: false, webhookUrl: '' }
+  });
 });
 
 app.post('/api/simulate/incident', authRequired, adminOnly, async (req, res) => {
