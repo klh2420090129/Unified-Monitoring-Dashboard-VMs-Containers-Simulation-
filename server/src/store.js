@@ -82,12 +82,12 @@ function createSeedVMs() {
 
 function createSeedContainers() {
   return [
-    { id: randomUUID(), name: 'api-gateway', pod: 'pod-a', region: 'us-east-1', status: 'Healthy', cpu: 24, memory: 35, restartCount: 1 },
-    { id: randomUUID(), name: 'billing-worker', pod: 'pod-a', region: 'us-east-1', status: 'Healthy', cpu: 39, memory: 48, restartCount: 0 },
-    { id: randomUUID(), name: 'log-collector', pod: 'pod-b', region: 'eu-west-1', status: 'Warning', cpu: 74, memory: 66, restartCount: 2 },
-    { id: randomUUID(), name: 'metrics-exporter', pod: 'pod-b', region: 'us-west-2', status: 'Healthy', cpu: 19, memory: 23, restartCount: 0 },
-    { id: randomUUID(), name: 'session-cache', pod: 'pod-c', region: 'us-east-1', status: 'Healthy', cpu: 33, memory: 42, restartCount: 0 },
-    { id: randomUUID(), name: 'notification-svc', pod: 'pod-c', region: 'eu-west-1', status: 'Warning', cpu: 81, memory: 77, restartCount: 3 }
+    { id: randomUUID(), name: 'api-gateway', pod: 'pod-a', region: 'us-east-1', status: 'Healthy', cpu: 24, memory: 35, restartCount: 1, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'billing-worker', pod: 'pod-a', region: 'us-east-1', status: 'Healthy', cpu: 39, memory: 48, restartCount: 0, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'log-collector', pod: 'pod-b', region: 'eu-west-1', status: 'Warning', cpu: 74, memory: 66, restartCount: 2, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'metrics-exporter', pod: 'pod-b', region: 'us-west-2', status: 'Healthy', cpu: 19, memory: 23, restartCount: 0, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'session-cache', pod: 'pod-c', region: 'us-east-1', status: 'Healthy', cpu: 33, memory: 42, restartCount: 0, createdByAutoscaler: false },
+    { id: randomUUID(), name: 'notification-svc', pod: 'pod-c', region: 'eu-west-1', status: 'Warning', cpu: 81, memory: 77, restartCount: 3, createdByAutoscaler: false }
   ];
 }
 
@@ -164,6 +164,11 @@ export function createInitialState() {
         'us-east-1': { highStreak: 0, lowStreak: 0 },
         'us-west-2': { highStreak: 0, lowStreak: 0 },
         'eu-west-1': { highStreak: 0, lowStreak: 0 }
+      },
+      containerAutoscalingSignals: {
+        'us-east-1': { highStreak: 0, lowStreak: 0, rebalanceCount: 0 },
+        'us-west-2': { highStreak: 0, lowStreak: 0, rebalanceCount: 0 },
+        'eu-west-1': { highStreak: 0, lowStreak: 0, rebalanceCount: 0 }
       },
       lastTrafficHotspot: 'us-west-2'
     }
@@ -348,6 +353,146 @@ function getRegionSnapshot(region) {
   };
 }
 
+function getRegionalContainerStats(region) {
+  const active = state.containers.filter((container) => container.region === region && container.status !== 'Crashed' && container.status !== 'Stopped');
+  const autoscaledRunning = active.filter((container) => container.createdByAutoscaler).length;
+  const averageCpu = active.length
+    ? active.reduce((sum, container) => sum + container.cpu, 0) / active.length
+    : 0;
+
+  return {
+    active,
+    autoscaledRunning,
+    averageCpu
+  };
+}
+
+function addAutoscaledContainer(region) {
+  const regional = state.containers.filter((container) => container.region === region);
+  const podCounts = regional.reduce((acc, container) => {
+    acc[container.pod] = (acc[container.pod] || 0) + 1;
+    return acc;
+  }, {});
+  const targetPod = Object.entries(podCounts).sort((a, b) => a[1] - b[1])[0]?.[0] || `pod-autoscale-${region}`;
+  const nextIndex = regional.filter((container) => container.name.startsWith('autoscale-c-')).length + 1;
+
+  const container = {
+    id: randomUUID(),
+    name: `autoscale-c-${region}-${nextIndex}`,
+    pod: targetPod,
+    region,
+    status: 'Healthy',
+    cpu: 22,
+    memory: 28,
+    restartCount: 0,
+    createdByAutoscaler: true
+  };
+
+  state.containers.push(container);
+  return container;
+}
+
+function removeAutoscaledContainer(region) {
+  const activeRegional = state.containers.filter((container) => container.region === region && container.status !== 'Crashed' && container.status !== 'Stopped');
+  if (activeRegional.length <= 1) {
+    return null;
+  }
+
+  const candidate = activeRegional.find((container) => container.createdByAutoscaler);
+  if (!candidate) {
+    return null;
+  }
+
+  state.containers = state.containers.filter((container) => container.id !== candidate.id);
+  return candidate;
+}
+
+function rebalanceContainerLoad(sourceRegion, policy) {
+  const source = getRegionalContainerStats(sourceRegion);
+  if (source.active.length === 0) {
+    return null;
+  }
+
+  const candidates = regions
+    .filter((region) => region !== sourceRegion)
+    .map((region) => ({ region, stats: getRegionalContainerStats(region) }))
+    .filter((entry) => entry.stats.active.length > 0 && entry.stats.averageCpu < policy.cpuThreshold - 14)
+    .sort((a, b) => a.stats.averageCpu - b.stats.averageCpu);
+
+  const target = candidates[0];
+  if (!target) {
+    return null;
+  }
+
+  const pressureGap = Math.max(source.averageCpu - target.stats.averageCpu, 0);
+  const shift = clamp(Number((pressureGap * 0.28).toFixed(1)), 5, 15);
+
+  source.active.forEach((container) => {
+    container.cpu = clamp(Number((container.cpu - shift * 0.22 - Math.random() * 1.2).toFixed(1)), 3, 99);
+    container.memory = clamp(Number((container.memory - shift * 0.16 - Math.random()).toFixed(1)), 5, 99);
+    if (container.cpu < 82 && container.memory < 86 && container.status !== 'Crashed') {
+      container.status = 'Healthy';
+    }
+  });
+
+  target.stats.active.forEach((container) => {
+    container.cpu = clamp(Number((container.cpu + shift * 0.1 + Math.random()).toFixed(1)), 3, 99);
+    container.memory = clamp(Number((container.memory + shift * 0.08 + Math.random() * 0.7).toFixed(1)), 5, 99);
+  });
+
+  return {
+    sourceRegion,
+    targetRegion: target.region,
+    shift
+  };
+}
+
+function rebalanceRegionalLoad(sourceRegion, policy) {
+  const sourceStats = getRegionalRunningVmStats(sourceRegion);
+  const sourceTraffic = Number(state.metrics?.regionTraffic?.[sourceRegion] ?? sourceStats.averageCpu);
+
+  if (sourceStats.running.length === 0) {
+    return null;
+  }
+
+  const candidates = regions
+    .filter((region) => region !== sourceRegion)
+    .map((region) => {
+      const stats = getRegionalRunningVmStats(region);
+      const traffic = Number(state.metrics?.regionTraffic?.[region] ?? stats.averageCpu);
+      return { region, stats, traffic };
+    })
+    .filter((entry) => entry.stats.running.length > 0 && entry.stats.averageCpu < policy.cpuThreshold - 10 && entry.traffic < policy.cpuThreshold - 8)
+    .sort((a, b) => (a.stats.averageCpu + a.traffic) - (b.stats.averageCpu + b.traffic));
+
+  const target = candidates[0];
+  if (!target) {
+    return null;
+  }
+
+  const pressureGap = Math.max(sourceTraffic - target.traffic, 0);
+  const shift = clamp(Number((pressureGap * 0.34).toFixed(1)), 6, 18);
+
+  state.metrics.regionTraffic[sourceRegion] = clamp(Number((sourceTraffic - shift).toFixed(1)), 15, 98);
+  state.metrics.regionTraffic[target.region] = clamp(Number((target.traffic + shift * 0.72).toFixed(1)), 15, 98);
+
+  sourceStats.running.forEach((vm) => {
+    vm.cpu = clamp(Number((vm.cpu - shift * 0.24 - Math.random() * 1.8).toFixed(1)), 5, 98);
+    vm.memory = clamp(Number((vm.memory - shift * 0.15 - Math.random() * 1.2).toFixed(1)), 10, 96);
+  });
+
+  target.stats.running.forEach((vm) => {
+    vm.cpu = clamp(Number((vm.cpu + shift * 0.11 + Math.random()).toFixed(1)), 5, 98);
+    vm.memory = clamp(Number((vm.memory + shift * 0.08 + Math.random() * 0.8).toFixed(1)), 10, 96);
+  });
+
+  return {
+    sourceRegion,
+    targetRegion: target.region,
+    shift
+  };
+}
+
 function buildCostForecast(overallEstimate, autoscalingPremium) {
   const recent = state.history.slice(-6);
   const first = recent[0] || recent[recent.length - 1];
@@ -435,18 +580,48 @@ export function evaluateAutoscaling() {
     const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
     const hasCapacityPressure =
       regional.running.length > 0 && regional.running.every((vm) => vm.cpu >= policy.cpuThreshold) && regionTraffic >= policy.cpuThreshold - 2;
-    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0 };
+    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0, rebalanceCount: 0 };
 
     if (hasCapacityPressure) {
       currentSignal.highStreak += 1;
       currentSignal.lowStreak = 0;
     } else {
       currentSignal.highStreak = 0;
+      currentSignal.rebalanceCount = 0;
     }
 
     signals[region] = currentSignal;
 
-    if (currentSignal.highStreak >= 2 && regional.running.length < policy.maxVmsPerRegion) {
+    let rebalanced = null;
+    if (hasCapacityPressure && currentSignal.rebalanceCount < 2) {
+      rebalanced = rebalanceRegionalLoad(region, policy);
+      if (rebalanced) {
+        currentSignal.rebalanceCount += 1;
+        signals[region] = currentSignal;
+        const action = `Load rebalanced from ${rebalanced.sourceRegion} to ${rebalanced.targetRegion}`;
+        state.metrics.lastScalingAction = `${action} at ${now()}`;
+        state.metrics.lastScalingAt = now();
+        state.metrics.autoscalingState = 'Rebalancing';
+        appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} (traffic shift ${rebalanced.shift}%).` });
+        recordTimelineEvent({
+          type: 'rebalance',
+          region,
+          severity: 'Info',
+          title: `Load rebalanced from ${rebalanced.sourceRegion}`,
+          details: `Traffic and compute load were redistributed to ${rebalanced.targetRegion} before scaling out.`
+        });
+        state.metrics.autoscalingSignals = signals;
+        return { type: 'rebalance', message: action, region, targetRegion: rebalanced.targetRegion };
+      }
+    }
+
+    const shouldScaleOut =
+      hasCapacityPressure &&
+      currentSignal.highStreak >= 2 &&
+      regional.running.length < policy.maxVmsPerRegion &&
+      (currentSignal.rebalanceCount >= 1 || !rebalanced);
+
+    if (shouldScaleOut) {
       const created = addAutoscaledVm(region);
       const action = `+1 VM added in ${region}`;
       state.metrics.lastScalingAction = `${action} at ${now()}`;
@@ -469,12 +644,13 @@ export function evaluateAutoscaling() {
   for (const region of regions) {
     const regional = getRegionalRunningVmStats(region);
     const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
-    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0 };
+    const currentSignal = signals[region] || { highStreak: 0, lowStreak: 0, rebalanceCount: 0 };
     const canScaleIn = regional.autoscaledRunning > 0 && regional.running.length > policy.minVmsPerRegion && regional.averageCpu < policy.cpuThreshold - 12 && regionTraffic < policy.cpuThreshold - 8;
 
     if (canScaleIn) {
       currentSignal.lowStreak += 1;
       currentSignal.highStreak = 0;
+      currentSignal.rebalanceCount = 0;
     } else {
       currentSignal.lowStreak = 0;
     }
@@ -505,7 +681,122 @@ export function evaluateAutoscaling() {
     }
   }
 
+  const containerSignals = { ...(state.metrics.containerAutoscalingSignals || {}) };
+
+  for (const region of regions) {
+    const regional = getRegionalContainerStats(region);
+    const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
+    const containerThreshold = Math.max(50, policy.cpuThreshold - 4);
+    const hasContainerPressure =
+      regional.active.length > 0 &&
+      regional.active.every((container) => container.cpu >= containerThreshold || container.status === 'Warning') &&
+      regionTraffic >= containerThreshold - 2;
+
+    const currentSignal = containerSignals[region] || { highStreak: 0, lowStreak: 0, rebalanceCount: 0 };
+
+    if (hasContainerPressure) {
+      currentSignal.highStreak += 1;
+      currentSignal.lowStreak = 0;
+    } else {
+      currentSignal.highStreak = 0;
+      currentSignal.rebalanceCount = 0;
+    }
+
+    containerSignals[region] = currentSignal;
+
+    if (hasContainerPressure && currentSignal.rebalanceCount < 2) {
+      const rebalanced = rebalanceContainerLoad(region, policy);
+      if (rebalanced) {
+        currentSignal.rebalanceCount += 1;
+        containerSignals[region] = currentSignal;
+        const action = `Container load rebalanced from ${rebalanced.sourceRegion} to ${rebalanced.targetRegion}`;
+        state.metrics.lastScalingAction = `${action} at ${now()}`;
+        state.metrics.lastScalingAt = now();
+        state.metrics.autoscalingState = 'Rebalancing';
+        appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} (traffic shift ${rebalanced.shift}%).` });
+        recordTimelineEvent({
+          type: 'rebalance-container',
+          region,
+          severity: 'Info',
+          title: `Container load rebalanced from ${rebalanced.sourceRegion}`,
+          details: `Container pressure was redistributed to ${rebalanced.targetRegion} before scaling out pods.`
+        });
+        state.metrics.containerAutoscalingSignals = containerSignals;
+        return { type: 'rebalance-container', message: action, region, targetRegion: rebalanced.targetRegion };
+      }
+    }
+
+    const shouldScaleOutContainers =
+      hasContainerPressure &&
+      currentSignal.highStreak >= 2 &&
+      regional.active.length < policy.maxVmsPerRegion * 3;
+
+    if (shouldScaleOutContainers) {
+      const created = addAutoscaledContainer(region);
+      const action = `+1 container added in ${region}`;
+      state.metrics.lastScalingAction = `${action} at ${now()}`;
+      state.metrics.lastScalingAt = now();
+      state.metrics.autoscalingState = 'Scaling Out';
+      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} after rebalance could not normalize pod pressure.` });
+      recordTimelineEvent({
+        type: 'scale-out-container',
+        region,
+        severity: 'Warning',
+        title: `Autoscaler added container in ${region}`,
+        details: `Container load remained elevated after rebalancing, so a new container was created.`,
+        vmName: created.name
+      });
+      state.metrics.containerAutoscalingSignals = containerSignals;
+      return { type: 'out-container', message: action, region, containerName: created.name };
+    }
+  }
+
+  for (const region of regions) {
+    const regional = getRegionalContainerStats(region);
+    const regionTraffic = Number(state.metrics.regionTraffic?.[region] ?? regional.averageCpu);
+    const currentSignal = containerSignals[region] || { highStreak: 0, lowStreak: 0, rebalanceCount: 0 };
+    const containerThreshold = Math.max(50, policy.cpuThreshold - 4);
+    const canScaleInContainers =
+      regional.autoscaledRunning > 0 &&
+      regional.averageCpu < containerThreshold - 12 &&
+      regionTraffic < containerThreshold - 8;
+
+    if (canScaleInContainers) {
+      currentSignal.lowStreak += 1;
+      currentSignal.highStreak = 0;
+      currentSignal.rebalanceCount = 0;
+    } else {
+      currentSignal.lowStreak = 0;
+    }
+
+    containerSignals[region] = currentSignal;
+
+    if (currentSignal.lowStreak >= 2) {
+      const removed = removeAutoscaledContainer(region);
+      if (!removed) {
+        continue;
+      }
+
+      const action = `-1 autoscaled container removed from ${region}`;
+      state.metrics.lastScalingAction = `${action} at ${now()}`;
+      state.metrics.lastScalingAt = now();
+      state.metrics.autoscalingState = 'Scaling In';
+      appendLog({ serviceName: 'autoscaler', level: 'INFO', message: `${action} after container load normalized.` });
+      recordTimelineEvent({
+        type: 'scale-in-container',
+        region,
+        severity: 'Info',
+        title: `Autoscaler removed container from ${region}`,
+        details: `Traffic stabilized and temporary container capacity was scaled back in.`,
+        vmName: removed.name
+      });
+      state.metrics.containerAutoscalingSignals = containerSignals;
+      return { type: 'in-container', message: action, region, containerName: removed.name };
+    }
+  }
+
   state.metrics.autoscalingSignals = signals;
+  state.metrics.containerAutoscalingSignals = containerSignals;
 
   return null;
 }

@@ -36,7 +36,8 @@ const containerSchema = new mongoose.Schema(
     status: String,
     cpu: Number,
     memory: Number,
-    restartCount: Number
+    restartCount: Number,
+    createdByAutoscaler: Boolean
   },
   { timestamps: true }
 );
