@@ -218,17 +218,122 @@ export default function App() {
     [search, logs, logLevel]
   );
 
+  async function refreshCoreData() {
+    const [overviewPayload, vmsPayload, containersPayload, alertsPayload, historyPayload, logsPayload] = await Promise.all([
+      request('/api/dashboard/overview', { token: auth.token }),
+      request('/api/vms', { token: auth.token }),
+      request('/api/containers', { token: auth.token }),
+      request('/api/alerts', { token: auth.token }),
+      request('/api/history', { token: auth.token }),
+      request('/api/logs', { token: auth.token })
+    ]);
+
+    setOverview(overviewPayload.overview);
+    setPods(overviewPayload.pods || containersPayload.pods || []);
+    setVms(vmsPayload.vms);
+    setContainers(containersPayload.containers);
+    setAlerts(alertsPayload.alerts);
+    setHistory(historyPayload.history);
+    setLogs(logsPayload.logs);
+    setLastUpdatedAt(new Date());
+  }
+
   async function handleVmAction(id, action) {
     try {
-      const payload = await request(`/api/vms/${id}/action`, {
+      await request(`/api/vms/${id}/action`, {
         token: auth.token,
         method: 'POST',
         body: { action }
       });
-      setVms((items) => items.map((vm) => (vm.id === payload.vm.id ? payload.vm : vm)));
-      const fresh = await request('/api/dashboard/overview', { token: auth.token });
-      setOverview(fresh.overview);
-      setPods(fresh.pods || []);
+      await refreshCoreData();
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleCreateVm(data) {
+    try {
+      await request('/api/vms', { token: auth.token, method: 'POST', body: data });
+      await refreshCoreData();
+      setMessage(`VM ${data.name} created.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleDeleteVm(id) {
+    try {
+      await request(`/api/vms/${id}`, { token: auth.token, method: 'DELETE' });
+      await refreshCoreData();
+      setMessage('VM deleted.');
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleCreateContainer(data) {
+    try {
+      await request('/api/containers', { token: auth.token, method: 'POST', body: data });
+      await refreshCoreData();
+      setMessage(`Container ${data.name} created.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleContainerAction(id, action) {
+    try {
+      await request(`/api/containers/${id}/action`, {
+        token: auth.token,
+        method: 'POST',
+        body: { action }
+      });
+      await refreshCoreData();
+      setMessage(`Container ${action} action completed.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleDeleteContainer(id) {
+    try {
+      await request(`/api/containers/${id}`, { token: auth.token, method: 'DELETE' });
+      await refreshCoreData();
+      setMessage('Container deleted.');
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleCreatePod(data) {
+    try {
+      await request('/api/pods', { token: auth.token, method: 'POST', body: data });
+      await refreshCoreData();
+      setMessage(`Pod ${data.pod} created.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleScalePod(pod, delta) {
+    try {
+      await request(`/api/pods/${encodeURIComponent(pod)}/scale`, {
+        token: auth.token,
+        method: 'POST',
+        body: { delta }
+      });
+      await refreshCoreData();
+      setMessage(`Pod ${pod} scaled ${delta > 0 ? 'out' : 'in'}.`);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function handleDeletePod(pod) {
+    try {
+      await request(`/api/pods/${encodeURIComponent(pod)}`, { token: auth.token, method: 'DELETE' });
+      await refreshCoreData();
+      setMessage(`Pod ${pod} deleted.`);
     } catch (error) {
       setMessage(error.message);
     }
@@ -455,7 +560,13 @@ export default function App() {
         <div className="mt-4 space-y-4">
           <ChartsPanel history={history} />
           <div className="grid gap-4 xl:grid-cols-[1.4fr_0.9fr]">
-            <VmTable vms={filteredVms} onAction={handleVmAction} canManage={canManage} />
+            <VmTable
+              vms={filteredVms}
+              onAction={handleVmAction}
+              onCreateVm={handleCreateVm}
+              onDeleteVm={handleDeleteVm}
+              canManage={canManage}
+            />
             <div className="space-y-4">
               <AlertsPanel alerts={alerts} onClear={handleClearAlerts} canManage={canManage} />
               <PredictionsPanel predictions={predictions} />
@@ -479,8 +590,30 @@ export default function App() {
         </div>
       )}
 
-      {activeView === 'VMs' && <div className="mt-4"><VmTable vms={filteredVms} onAction={handleVmAction} canManage={canManage} /></div>}
-      {activeView === 'Containers' && <ContainersPanel containers={filteredContainers} pods={pods} />}
+      {activeView === 'VMs' && (
+        <div className="mt-4">
+          <VmTable
+            vms={filteredVms}
+            onAction={handleVmAction}
+            onCreateVm={handleCreateVm}
+            onDeleteVm={handleDeleteVm}
+            canManage={canManage}
+          />
+        </div>
+      )}
+      {activeView === 'Containers' && (
+        <ContainersPanel
+          containers={filteredContainers}
+          pods={pods}
+          canManage={canManage}
+          onCreateContainer={handleCreateContainer}
+          onContainerAction={handleContainerAction}
+          onDeleteContainer={handleDeleteContainer}
+          onCreatePod={handleCreatePod}
+          onScalePod={handleScalePod}
+          onDeletePod={handleDeletePod}
+        />
+      )}
       {activeView === 'Alerts' && (
         <div className="space-y-3">
           <div className="flex justify-end">

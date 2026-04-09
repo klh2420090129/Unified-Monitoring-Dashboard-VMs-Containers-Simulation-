@@ -106,6 +106,15 @@ async function flushToMongo() {
   await persistState(state);
 }
 
+async function commitAndBroadcastState() {
+  sanitizeMetrics();
+  recordHistoryPoint();
+  await flushToMongo();
+  io.emit('metrics:update', { overview: buildOverview(), history: state.history });
+  io.emit('alerts:update', state.alerts);
+  io.emit('logs:update', state.logs);
+}
+
 app.get('/api/health', async (req, res) => {
   await syncFromMongo();
   res.json({ status: 'ok', regions: sampleRegions });
@@ -170,6 +179,53 @@ app.get('/api/vms', authRequired, async (req, res) => {
   res.json({ vms: state.vms });
 });
 
+app.post('/api/vms', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const name = String(req.body?.name || '').trim();
+  const region = sampleRegions.includes(req.body?.region) ? req.body.region : sampleRegions[0];
+
+  if (!name) {
+    return res.status(400).json({ message: 'VM name is required' });
+  }
+
+  const vm = {
+    id: randomUUID(),
+    name,
+    region,
+    status: 'Running',
+    cpu: 18,
+    memory: 24,
+    disk: 20,
+    spike: false
+  };
+
+  state.vms.push(vm);
+  appendLog({ serviceName: vm.name, level: 'INFO', message: 'VM created manually by administrator.' });
+  await commitAndBroadcastState();
+
+  return res.status(201).json({ vm });
+});
+
+app.delete('/api/vms/:id', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  if (state.vms.length <= 1) {
+    return res.status(400).json({ message: 'At least one VM must remain in the simulation.' });
+  }
+
+  const index = state.vms.findIndex((entry) => entry.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ message: 'VM not found' });
+  }
+
+  const [deletedVm] = state.vms.splice(index, 1);
+  appendLog({ serviceName: deletedVm.name, level: 'INFO', message: 'VM deleted manually by administrator.' });
+  await commitAndBroadcastState();
+
+  return res.json({ deletedId: deletedVm.id });
+});
+
 app.post('/api/vms/:id/action', authRequired, adminOnly, async (req, res) => {
   await syncFromMongo();
   const vm = state.vms.find((entry) => entry.id === req.params.id);
@@ -209,6 +265,14 @@ app.post('/api/vms/:id/action', authRequired, adminOnly, async (req, res) => {
     appendLog({ serviceName: vm.name, level: 'ERROR', message: 'Synthetic CPU spike triggered.' });
   }
 
+  if (action === 'restart') {
+    vm.status = 'Running';
+    vm.cpu = Math.max(12, vm.cpu);
+    vm.memory = Math.max(18, vm.memory);
+    vm.spike = false;
+    appendLog({ serviceName: vm.name, level: 'INFO', message: 'VM restarted via dashboard control.' });
+  }
+
   const payload = simulateTick();
   await flushToMongo();
 
@@ -222,6 +286,192 @@ app.post('/api/vms/:id/action', authRequired, adminOnly, async (req, res) => {
 app.get('/api/containers', authRequired, async (req, res) => {
   await syncFromMongo();
   res.json({ containers: state.containers, pods: getPodGroups() });
+});
+
+app.post('/api/containers', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const name = String(req.body?.name || '').trim();
+  const pod = String(req.body?.pod || '').trim();
+  const region = sampleRegions.includes(req.body?.region) ? req.body.region : sampleRegions[0];
+
+  if (!name || !pod) {
+    return res.status(400).json({ message: 'Container name and pod are required' });
+  }
+
+  const container = {
+    id: randomUUID(),
+    name,
+    pod,
+    region,
+    status: 'Healthy',
+    cpu: 16,
+    memory: 22,
+    restartCount: 0
+  };
+
+  state.containers.push(container);
+  appendLog({ serviceName: container.name, level: 'INFO', message: `Container created in ${container.pod} by administrator.` });
+  await commitAndBroadcastState();
+
+  return res.status(201).json({ container });
+});
+
+app.post('/api/containers/:id/action', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const container = state.containers.find((entry) => entry.id === req.params.id);
+  if (!container) {
+    return res.status(404).json({ message: 'Container not found' });
+  }
+
+  const action = String(req.body?.action || '').toLowerCase();
+
+  if (action === 'stop') {
+    container.status = 'Stopped';
+    container.cpu = 0;
+    container.memory = 0;
+    appendLog({ serviceName: container.name, level: 'INFO', message: 'Container stopped manually by administrator.' });
+  } else if (action === 'restart') {
+    container.status = 'Healthy';
+    container.cpu = Math.max(12, container.cpu || 12);
+    container.memory = Math.max(16, container.memory || 16);
+    container.restartCount += 1;
+    appendLog({ serviceName: container.name, level: 'INFO', message: 'Container restarted manually by administrator.' });
+  } else if (action === 'start') {
+    container.status = 'Healthy';
+    container.cpu = Math.max(10, container.cpu || 10);
+    container.memory = Math.max(15, container.memory || 15);
+    appendLog({ serviceName: container.name, level: 'INFO', message: 'Container started manually by administrator.' });
+  } else {
+    return res.status(400).json({ message: 'Unsupported container action' });
+  }
+
+  await commitAndBroadcastState();
+  return res.json({ container });
+});
+
+app.delete('/api/containers/:id', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  if (state.containers.length <= 1) {
+    return res.status(400).json({ message: 'At least one container must remain in the simulation.' });
+  }
+
+  const index = state.containers.findIndex((entry) => entry.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ message: 'Container not found' });
+  }
+
+  const [removed] = state.containers.splice(index, 1);
+  appendLog({ serviceName: removed.name, level: 'INFO', message: 'Container deleted manually by administrator.' });
+  await commitAndBroadcastState();
+  return res.json({ deletedId: removed.id });
+});
+
+app.post('/api/pods', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const pod = String(req.body?.pod || '').trim();
+  const region = sampleRegions.includes(req.body?.region) ? req.body.region : sampleRegions[0];
+
+  if (!pod) {
+    return res.status(400).json({ message: 'Pod name is required' });
+  }
+
+  if (state.containers.some((container) => container.pod === pod)) {
+    return res.status(409).json({ message: 'Pod already exists' });
+  }
+
+  const baseContainer = {
+    id: randomUUID(),
+    name: `${pod}-svc-1`,
+    pod,
+    region,
+    status: 'Healthy',
+    cpu: 14,
+    memory: 20,
+    restartCount: 0
+  };
+
+  state.containers.push(baseContainer);
+  appendLog({ serviceName: pod, level: 'INFO', message: `Pod ${pod} created by administrator.` });
+  await commitAndBroadcastState();
+
+  return res.status(201).json({ pod, region });
+});
+
+app.post('/api/pods/:pod/scale', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const podName = req.params.pod;
+  const delta = Number(req.body?.delta || 0);
+  const podContainers = state.containers.filter((container) => container.pod === podName);
+
+  if (podContainers.length === 0) {
+    return res.status(404).json({ message: 'Pod not found' });
+  }
+
+  if (Number.isNaN(delta) || delta === 0) {
+    return res.status(400).json({ message: 'Scale delta must be a non-zero number' });
+  }
+
+  if (delta > 0) {
+    const region = podContainers[0].region;
+    const startingIndex = podContainers.length + 1;
+    for (let index = 0; index < delta; index += 1) {
+      state.containers.push({
+        id: randomUUID(),
+        name: `${podName}-svc-${startingIndex + index}`,
+        pod: podName,
+        region,
+        status: 'Healthy',
+        cpu: 12,
+        memory: 18,
+        restartCount: 0
+      });
+    }
+    appendLog({ serviceName: podName, level: 'INFO', message: `Pod scaled out by ${delta} container(s).` });
+  } else {
+    const removableCount = Math.min(Math.abs(delta), Math.max(podContainers.length - 1, 0));
+    if (removableCount <= 0) {
+      return res.status(400).json({ message: 'Pod must keep at least one container.' });
+    }
+
+    let removed = 0;
+    for (let index = state.containers.length - 1; index >= 0 && removed < removableCount; index -= 1) {
+      if (state.containers[index].pod === podName) {
+        state.containers.splice(index, 1);
+        removed += 1;
+      }
+    }
+    appendLog({ serviceName: podName, level: 'INFO', message: `Pod scaled in by ${removed} container(s).` });
+  }
+
+  await commitAndBroadcastState();
+  return res.json({ pod: podName, containers: state.containers.filter((container) => container.pod === podName).length });
+});
+
+app.delete('/api/pods/:pod', authRequired, adminOnly, async (req, res) => {
+  await syncFromMongo();
+
+  const podName = req.params.pod;
+  const totalPodCount = new Set(state.containers.map((container) => container.pod)).size;
+  if (totalPodCount <= 1) {
+    return res.status(400).json({ message: 'At least one pod must remain in the simulation.' });
+  }
+
+  const before = state.containers.length;
+  state.containers = state.containers.filter((container) => container.pod !== podName);
+  const removed = before - state.containers.length;
+
+  if (removed === 0) {
+    return res.status(404).json({ message: 'Pod not found' });
+  }
+
+  appendLog({ serviceName: podName, level: 'INFO', message: `Pod ${podName} deleted by administrator.` });
+  await commitAndBroadcastState();
+  return res.json({ pod: podName, removedContainers: removed });
 });
 
 app.get('/api/alerts', authRequired, async (req, res) => {
